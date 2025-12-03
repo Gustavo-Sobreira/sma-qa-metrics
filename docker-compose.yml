@@ -1,48 +1,93 @@
 services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: sonar
-      POSTGRES_PASSWORD: sonarpass
-      POSTGRES_DB: agents_db
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
 
-  sonarqube:
-    image: sonarqube:community
-    environment:
-      SONAR_JDBC_URL: jdbc:postgresql://postgres:5432/agents_db
-      SONAR_JDBC_USERNAME: sonar
-      SONAR_JDBC_PASSWORD: sonarpass
-    depends_on:
-      - postgres
-    ports:
-      - "9000:9000"
-    volumes:
-      - sonarqube_data:/opt/sonarqube/data
-      - sonarqube_logs:/opt/sonarqube/logs
-
-  agents:
+  jade-platform:
     build:
+      context: ./agentes_jade
       dockerfile: Dockerfile
-    container_name: jade_agents
-    environment:
-      POSTGRES_URL: jdbc:postgresql://postgres:5432/agents_db
-      POSTGRES_USER: sonar
-      POSTGRES_PASSWORD: sonarpass
-      SONAR_HOST_URL: http://sonarqube:9000
-      SONAR_LOGIN: ""
-    depends_on:
-      - postgres
-      - sonarqube
+    container_name: jade-platform
+    restart: unless-stopped
     ports:
       - "8080:8080"
+    depends_on:
+      - mongo
+
+  webhook-server:
+    build:
+      context: .
+      dockerfile: workers/webhook-server/Dockerfile
+    container_name: webhook-server
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    depends_on:
+      - jade-platform
+
+  sonar-worker:
+    build:
+      context: .
+      dockerfile: workers/sonar-worker/Dockerfile
+    container_name: sonar-worker
+    restart: unless-stopped
+    environment:
+      PROJECT_KEY: sma-qa-metrics
+    depends_on:
+      - sonarqube
+      - webhook-server
+
+
+  sonarqube:
+    image: sonarqube:9.9-community
+    container_name: sonarqube
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
+    depends_on:
+      - mongo
+
+  sonar-bootstrap:
+    image: sonarsource/sonar-scanner-cli:latest
+    depends_on:
+      - sonarqube
+    environment:
+      - PROJECT_KEY= sma-qa-metrics
+      - SONAR_HOST_URL=http://sonarqube:9000
+      - SONAR_LOGIN=${SONAR_TOKEN}
+    command: >
+      bash -c "
+        # wait until SonarQube is ready (simple loop)
+        until curl -s http://sonarqube:9000/api/system/health | grep -q 'GREEN'; do
+          echo waiting sonar...
+          sleep 2
+        done
+        sonar-scanner \
+          -Dsonar.projectKey=${PROJECT_KEY} \
+          -Dsonar.sources=/src \
+          -Dsonar.host.url=http://sonarqube:9000 \
+          -Dsonar.login=${SONAR_TOKEN}
+      "
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ./repositorio:/src
+
+
+  phpmetrics-worker:
+    build:
+      context: .
+      dockerfile: workers/phpmetrics-worker/Dockerfile
+    container_name: phpmetrics-worker
+    restart: unless-stopped
+    depends_on:
+      - webhook-server
+
+  mongo:
+    image: mongo:6
+    container_name: mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
 
 volumes:
-  pgdata:
-  sonarqube_data:
-  sonarqube_logs:
+  mongo_data:
