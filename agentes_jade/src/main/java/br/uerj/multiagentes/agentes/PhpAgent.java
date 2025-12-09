@@ -37,7 +37,6 @@ public class PhpAgent extends Agent {
                         String repoPath = (String) payload.get("repo_path");
                         System.out.println("[PhpAgent] Received scan request for " + runId);
 
-                        // call phpmetrics worker
                         String body = gson.toJson(Map.of("run_id", runId, "repo_path", repoPath));
                         HttpRequest req = HttpRequest.newBuilder()
                                 .uri(URI.create(workerUrl))
@@ -46,13 +45,11 @@ public class PhpAgent extends Agent {
                                 .build();
                         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
 
-                        // update mongo
                         MongoDatabase db = MongoHelper.getDatabase();
                         MongoCollection<Document> runs = db.getCollection("run_status");
                         runs.updateOne(new Document("run_id", runId), new Document("$set",
                                 new Document("php_done", true).append("php_finished_at", Instant.now().toString())));
 
-                        // notify llm
                         ACLMessage notify = new ACLMessage(ACLMessage.INFORM);
                         notify.addReceiver(new jade.core.AID("llm", jade.core.AID.ISLOCALNAME));
                         notify.setContent(gson.toJson(Map.of("type", "PHP_DONE", "run_id", runId)));

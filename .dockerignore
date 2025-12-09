@@ -1,0 +1,8 @@
+node_modules
+vendor
+.env
+cache/
+tmp/
+
+agentes_jade
+workers

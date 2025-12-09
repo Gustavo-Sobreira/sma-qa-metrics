@@ -18,7 +18,6 @@ app.post("/event", async (req, res) => {
         return res.status(400).send("Missing 'type'");
     }
 
-    // Mapeamento para o agente correto
     let targetAgent = null;
 
     switch (payload.type) {
@@ -32,21 +31,20 @@ app.post("/event", async (req, res) => {
             return res.status(400).send("Unknown event type");
     }
 
-    // Envia para JADE
     try {
         await axios.post(`${JADE_ENDPOINT}/message`, {
             to: targetAgent,
             payload
         });
 
-        console.log(`📨 Enviado ao JADE → ${targetAgent}`);
+        console.log(`Enviado ao JADE → ${targetAgent}`);
         res.status(200).send("OK");
     } catch (err) {
-        console.error("❌ Erro enviando ao JADE:", err.message);
+        console.error("Erro enviando ao JADE:", err.message);
         res.status(500).send("Error");
     }
 });
 
 app.listen(4000, () => {
-    console.log("🚀 Webhook escutando em http://localhost:4000/event");
+    console.log("Webhook escutando em http://localhost:4000/event");
 });

@@ -1,68 +1,81 @@
 package br.uerj.multiagentes.agentes;
 
 import com.google.gson.Gson;
-import com.mongodb.client.MongoCollection;
-import com.mongodb.client.MongoDatabase;
-import br.uerj.multiagentes.utils.MongoHelper;
 import jade.core.Agent;
+import jade.core.AID;
 import jade.lang.acl.ACLMessage;
-import jade.lang.acl.MessageTemplate;
-import org.bson.Document;
 
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.net.URI;
-import java.time.Instant;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Map;
 
 public class SonarAgent extends Agent {
-    private Gson gson = new Gson();
-    private HttpClient http = HttpClient.newHttpClient();
-    private String workerUrl = System.getenv().getOrDefault("SONAR_WORKER_URL", "http://sonar-worker:9100/scan");
+
+    private final Gson gson = new Gson();
 
     @Override
     protected void setup() {
-        System.out.println("[SonarAgent] Ready. Worker: " + workerUrl);
+        System.out.println("[SonarAgent] Ready.");
+
         addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
             @Override
             public void action() {
-                MessageTemplate mt = MessageTemplate.MatchPerformative(ACLMessage.REQUEST);
-                ACLMessage msg = myAgent.receive(mt);
-                if (msg != null) {
-                    try {
-                        Map payload = gson.fromJson(msg.getContent(), Map.class);
-                        String runId = (String) payload.get("run_id");
-                        String repoPath = (String) payload.get("repo_path");
-                        System.out.println("[SonarAgent] Received scan request for " + runId);
-
-                        // call sonar-worker
-                        String body = gson.toJson(Map.of("run_id", runId, "repo_path", repoPath));
-                        HttpRequest req = HttpRequest.newBuilder()
-                                .uri(URI.create(workerUrl))
-                                .header("Content-Type", "application/json")
-                                .POST(HttpRequest.BodyPublishers.ofString(body))
-                                .build();
-                        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-
-                        // update mongo
-                        MongoDatabase db = MongoHelper.getDatabase();
-                        MongoCollection<Document> runs = db.getCollection("run_status");
-                        runs.updateOne(new Document("run_id", runId),
-                                new Document("$set", new Document("sonar_done", true).append("sonar_finished_at",
-                                        Instant.now().toString())));
-
-                        // notify llm
-                        ACLMessage notify = new ACLMessage(ACLMessage.INFORM);
-                        notify.addReceiver(new jade.core.AID("llm", jade.core.AID.ISLOCALNAME));
-                        notify.setContent(gson.toJson(Map.of("type", "SONAR_DONE", "run_id", runId)));
-                        send(notify);
-
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                    }
-                } else {
+                ACLMessage msg = myAgent.receive();
+                if (msg == null) {
                     block();
+                    return;
+                }
+
+                try {
+                    if (msg.getPerformative() != ACLMessage.REQUEST)
+                        return;
+
+                    Map payload = gson.fromJson(msg.getContent(), Map.class);
+                    if (payload == null) return;
+
+                    String runId = (String) payload.get("run_id");
+                    String repoPath = (String) payload.get("repo_path");
+
+                    System.out.println("[SonarAgent] Running sonar for run=" + runId + " path=" + repoPath);
+
+                    // -------------------------------------
+                    // 1) Executar sonar-scanner no container
+                    // -------------------------------------
+                    String cmd =
+                            "docker exec sonar_scanner sonar-scanner " +
+                            "-Dsonar.projectBaseDir=/usr/src/repo";
+
+                    System.out.println("[SonarAgent] Exec: " + cmd);
+
+                    ProcessBuilder pb = new ProcessBuilder("bash", "-c", cmd);
+                    pb.redirectErrorStream(true);
+                    Process process = pb.start();
+
+                    String output = new String(process.getInputStream().readAllBytes());
+                    int exit = process.waitFor();
+
+                    System.out.println("[SonarAgent] Scanner output:\n" + output);
+
+                    if (exit != 0) {
+                        System.err.println("[SonarAgent] Scanner failed (exit=" + exit + ")");
+                    }
+
+                    // -------------------------------------
+                    // 2) Enviar resposta para o QaAgent
+                    // -------------------------------------
+                    ACLMessage reply = new ACLMessage(ACLMessage.INFORM);
+                    reply.addReceiver(new AID("QaAgent", AID.ISLOCALNAME));
+                    reply.setContent(gson.toJson(Map.of(
+                            "run_id", runId,
+                            "agent", "sonar",
+                            "status", "OK"
+                    )));
+                    send(reply);
+
+                } catch (Exception e) {
+                    e.printStackTrace();
                 }
             }
         });

@@ -38,7 +38,6 @@ public class MetricsAgent extends Agent {
                             String repoPath = (String) payload.get("repo_path");
                             System.out.println("[MetricsAgent] Processing git log for " + runId);
 
-                            // --- Git analysis ---
                             ProcessBuilder pb = new ProcessBuilder("git", "-C", repoPath, "log", "--pretty=%an");
                             pb.redirectErrorStream(true);
                             Process p = pb.start();
@@ -58,7 +57,6 @@ public class MetricsAgent extends Agent {
                                     .append("commits_by_author", commitsByAuthor)
                                     .append("generated_at", Instant.now().toString());
 
-                            // --- MongoDB ---
                             MongoDatabase db = MongoHelper.getDatabase();
                             MongoCollection<Document> col = db.getCollection("metrics");
                             col.insertOne(metrics);
@@ -71,7 +69,6 @@ public class MetricsAgent extends Agent {
                                                     .append("metrics_finished_at", Instant.now().toString()))
                             );
 
-                            // --- Notify LLM ---
                             ACLMessage notify = new ACLMessage(ACLMessage.INFORM);
                             notify.addReceiver(new AID("llm", AID.ISLOCALNAME));
                             notify.setContent(gson.toJson(Map.of("type", "METRICS_DONE", "run_id", runId)));

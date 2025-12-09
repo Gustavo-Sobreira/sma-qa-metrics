@@ -10,62 +10,115 @@ import jade.lang.acl.ACLMessage;
 import jade.lang.acl.MessageTemplate;
 import org.bson.Document;
 
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.net.URI;
 import java.time.Instant;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 
 public class QaAgent extends Agent {
-    private Gson gson = new Gson();
-    private HttpClient http = HttpClient.newHttpClient();
+
+    private final Gson gson = new Gson();
 
     @Override
     protected void setup() {
+
         System.out.println("[QaAgent] Ready.");
+
         addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
+
+            private final Set<String> completedAgents = new HashSet<>();
+            private String currentRunId = null;
+            private String currentRepoPath = null;
+
             @Override
             public void action() {
-                MessageTemplate mt = MessageTemplate.MatchPerformative(ACLMessage.INFORM);
-                ACLMessage msg = myAgent.receive(mt);
-                if (msg != null) {
-                    try {
-                        String content = msg.getContent();
-                        Map payload = gson.fromJson(content, Map.class);
-                        if (payload != null && "NEW_REPO".equals(payload.get("type"))) {
-                            String runId = (String) payload.get("run_id");
-                            String repoPath = (String) payload.get("repo_path");
-                            System.out.println("[QaAgent] New repo: " + repoPath + " run=" + runId);
 
-                            // send request to SonarAgent and PhpAgent via ACL
-                            ACLMessage sonarReq = new ACLMessage(ACLMessage.REQUEST);
-                            sonarReq.addReceiver(new AID("sonar", AID.ISLOCALNAME));
-                            sonarReq.setContent(gson.toJson(Map.of("run_id", runId, "repo_path", repoPath)));
-                            send(sonarReq);
+                ACLMessage msg = myAgent.receive();
+                if (msg == null) {
+                    block();
+                    return;
+                }
 
-                            ACLMessage phpReq = new ACLMessage(ACLMessage.REQUEST);
-                            phpReq.addReceiver(new AID("php", AID.ISLOCALNAME));
-                            phpReq.setContent(gson.toJson(Map.of("run_id", runId, "repo_path", repoPath)));
-                            send(phpReq);
+                try {
+                    // ---------------------------------------------------------
+                    // 1) Nova execução recebida do CoordinatorAgent
+                    // ---------------------------------------------------------
+                    if (msg.getPerformative() == ACLMessage.INFORM &&
+                            "Repo-Cloned".equals(msg.getOntology())) {
 
-                            // update run_status -> qa_started
+                        Map payload = gson.fromJson(msg.getContent(), Map.class);
+                        String repoPath = (String) payload.get("repoPath");
+
+                        System.out.println("[QaAgent] Repositório recebido: " + repoPath);
+
+                        ACLMessage sonarReq = new ACLMessage(ACLMessage.REQUEST);
+                        sonarReq.addReceiver(new AID("sonar_agent", AID.ISLOCALNAME));
+                        sonarReq.setOntology("RUN_SONAR");
+                        sonarReq.setContent(gson.toJson(Map.of("repo_path", repoPath)));
+                        send(sonarReq);
+
+                        ACLMessage phpReq = new ACLMessage(ACLMessage.REQUEST);
+                        phpReq.addReceiver(new AID("php_agent", AID.ISLOCALNAME));
+                        phpReq.setOntology("RUN_PHPMETRICS");
+                        phpReq.setContent(gson.toJson(Map.of("repo_path", repoPath)));
+                        send(phpReq);
+
+                        return;
+                    }
+
+                    // ---------------------------------------------------------
+                    // 2) Recebendo respostas de SonarAgent e PhpAgent
+                    // ---------------------------------------------------------
+                    if (msg.getPerformative() == ACLMessage.INFORM &&
+                            msg.getOntology() != null &&
+                            msg.getOntology().equals("QA_SUBTASK_DONE")) {
+
+                        Map payload = gson.fromJson(msg.getContent(), Map.class);
+                        String runId = (String) payload.get("run_id");
+                        String agentName = (String) payload.get("agent");
+
+                        if (runId.equals(currentRunId)) {
+                            completedAgents.add(agentName);
+                            System.out.println("[QaAgent] Subtarefa concluída: " + agentName);
+                        }
+
+                        // -----------------------------------------------------
+                        // 3) Verificar se TODOS agentes concluíram
+                        // -----------------------------------------------------
+                        if (completedAgents.contains("sonar") &&
+                                completedAgents.contains("php")) {
+
+                            System.out.println("[QaAgent] ALL DONE for run " + currentRunId);
+
+                            // 3.1 Atualizar Mongo
                             MongoDatabase db = MongoHelper.getDatabase();
                             MongoCollection<Document> runs = db.getCollection("run_status");
-                            runs.updateOne(new Document("run_id", runId),
-                                    new Document("$set", new Document("qa_started_at", Instant.now().toString())));
 
-                            // notify llm that new data is being generated (status pending)
+                            runs.updateOne(
+                                    new Document("run_id", currentRunId),
+                                    new Document("$set", new Document("qa_completed_at",
+                                            Instant.now().toString())));
+
+                            // 3.2 Notificar LlmAgent
                             ACLMessage notify = new ACLMessage(ACLMessage.INFORM);
-                            notify.addReceiver(new AID("llm", AID.ISLOCALNAME));
-                            notify.setContent(gson.toJson(Map.of("type", "QA_STARTED", "run_id", runId)));
+                            notify.addReceiver(new AID("LlmAgent", AID.ISLOCALNAME));
+                            notify.setOntology("QA_COMPLETED");
+                            notify.setContent(gson.toJson(Map.of(
+                                    "type", "QA_COMPLETED",
+                                    "run_id", currentRunId)));
                             send(notify);
+
+                            // Reset
+                            completedAgents.clear();
+                            currentRunId = null;
+                            currentRepoPath = null;
                         }
-                    } catch (Exception e) {
-                        e.printStackTrace();
+
+                        return;
                     }
-                } else {
-                    block();
+
+                } catch (Exception e) {
+                    e.printStackTrace();
                 }
             }
         });

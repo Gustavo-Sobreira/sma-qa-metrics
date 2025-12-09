@@ -11,7 +11,7 @@ public class MongoHelper {
         if (client == null) {
             String uri = System.getenv("MONGO_URI");
             if (uri == null || uri.isEmpty())
-                uri = "mongodb://localhost:27017";
+                uri = "mongodb://mongo:27017";
             client = MongoClients.create(uri);
         }
         return client.getDatabase("analysis_results");

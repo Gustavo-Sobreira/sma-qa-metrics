@@ -28,4 +28,4 @@ function runPhpMetrics() {
     });
 }
 
-setInterval(runPhpMetrics, 45_000); // a cada 45s
+setInterval(runPhpMetrics, 45_000);

@@ -25,7 +25,6 @@ public class LlmAgent extends Agent {
     protected void setup() {
         System.out.println("[LlmAgent] Ready.");
 
-        // Behaviour periódico: verifica runs pendentes a cada 10s
         addBehaviour(new TickerBehaviour(this, 10_000) {
             @Override
             protected void onTick() {
@@ -37,7 +36,6 @@ public class LlmAgent extends Agent {
             }
         });
 
-        // Behaviour para mensagens puntuais (opcional)
         addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
             @Override
             public void action() {
@@ -45,7 +43,6 @@ public class LlmAgent extends Agent {
                 if (msg != null) {
                     try {
                         String content = msg.getContent();
-                        // mensagens curtas de notificação são tratadas através do polling
                         System.out.println("[LlmAgent] Received message: " + content);
                     } catch (Exception e) {
                         e.printStackTrace();
@@ -61,8 +58,6 @@ public class LlmAgent extends Agent {
         MongoDatabase db = MongoHelper.getDatabase();
         MongoCollection<Document> runs = db.getCollection("run_status");
 
-        // Query: runs where metrics_done = true, (php_done = true OR sonar_done =
-        // true), and llm_done != true
         Document filter = new Document("metrics_done", true)
                 .append("llm_done", new Document("$ne", true))
                 .append("$or", List.of(new Document("php_done", true), new Document("sonar_done", true)));
@@ -79,7 +74,6 @@ public class LlmAgent extends Agent {
                 String runId = run.getString("run_id");
                 System.out.println("[LlmAgent] Processing run: " + runId);
 
-                // Carregar métricas, sonar e php results (se existirem)
                 MongoCollection<Document> metricsCol = db.getCollection("metrics");
                 Document metrics = metricsCol.find(new Document("run_id", runId)).first();
 
@@ -89,10 +83,8 @@ public class LlmAgent extends Agent {
                 MongoCollection<Document> sonarCol = db.getCollection("sonar_runs");
                 Document sonar = sonarCol.find(new Document("run_id", runId)).first();
 
-                // Gerar resumo heurístico
                 Document summary = generateSummary(run, metrics, php, sonar);
 
-                // Salvar summary em analysis_final
                 MongoCollection<Document> finalCol = db.getCollection("analysis_final");
                 Document finalDoc = new Document("run_id", runId)
                         .append("repo", run.getString("repo"))
@@ -104,11 +96,9 @@ public class LlmAgent extends Agent {
                         .append("generated_at", Instant.now().toString());
                 finalCol.insertOne(finalDoc);
 
-                // Atualizar run_status
                 runs.updateOne(new Document("run_id", runId), new Document("$set",
                         new Document("llm_done", true).append("llm_at", Instant.now().toString())));
 
-                // Enviar notificação para coordinator (opcional)
                 ACLMessage notify = new ACLMessage(ACLMessage.INFORM);
                 notify.addReceiver(new AID("coordinator", AID.ISLOCALNAME));
                 notify.setContent(gson.toJson(Map.of("type", "LLM_SUMMARY_DONE", "run_id", runId)));
@@ -129,37 +119,31 @@ public class LlmAgent extends Agent {
         sb.append("Run: ").append(run.getString("run_id")).append("");
         sb.append("Repo: ").append(run.getString("repo")).append("");
 
-        // Metrics analysis
         if (metrics != null) {
             Integer totalCommits = metrics.getInteger("total_commits", 0);
             sb.append("Total commits (scanned): ").append(totalCommits).append("");
             sb.append("Commits by author:").append(metrics.get("commits_by_author")).append("// ");
-            // simple score: more commits -> higher activity
             scores.put("activity", Math.min(1.0, totalCommits / 100.0));
         } else {
             sb.append("No git metrics found.");
             scores.put("activity", 0.0);
         }
 
-        // PHPMetrics
         if (php != null) {
             sb.append("PHPMetrics: report available. Exit code:").append(php.getInteger("exit_code", -1)).append("");
             String reportPath = php.getString("json_report");
             if (reportPath != null) {
                 sb.append("PHPMetrics JSON: ").append(reportPath).append("");
             }
-            // heuristic score: success -> 0.5
             scores.put("php_quality", php.getInteger("exit_code", 1) == 0 ? 0.7 : 0.2);
         } else {
             sb.append("No phpmetrics result found.");
             scores.put("php_quality", 0.0);
         }
 
-        // Sonar
         if (sonar != null) {
             sb.append("Sonar: exit code: ").append(sonar.getInteger("exit_code",
                     -1)).append("");
-            // try to extract common measures from sonar output (if any stored)
             sb.append("Sonar raw output length: ")
                     .append(sonar.getString("output") == null ? 0 : sonar.getString("output").length())
                     .append(" chars");
@@ -168,7 +152,6 @@ public class LlmAgent extends Agent {
             sb.append("No sonar data found.");
             scores.put("code_quality", 0.0);
         }
-        // Combine into overall score
         double activity = ((Number) scores.getOrDefault("activity",
                 0.0)).doubleValue();
         double phpq = ((Number) scores.getOrDefault("php_quality",

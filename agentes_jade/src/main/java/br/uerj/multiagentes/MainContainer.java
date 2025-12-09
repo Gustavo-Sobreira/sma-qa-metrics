@@ -20,25 +20,25 @@ public class MainContainer {
 
             container = rt.createMainContainer(p);
 
-            // registra o container no serviço
             AgentMessenger.setContainer(container);
-
-            // inicia o HTTP REST
             MessageEndpoint.start();
 
-            container.createNewAgent("CoordinatorAgent",
+            container.createNewAgent("coordinator_agent",
                     "br.uerj.multiagentes.agentes.CoordinatorAgent", null).start();
 
-            container.createNewAgent("SonarAgent",
+            container.createNewAgent("qa_agent",
+                    "br.uerj.multiagentes.agentes.QaAgent", null).start();
+
+            container.createNewAgent("sonar_agent",
                     "br.uerj.multiagentes.agentes.SonarAgent", null).start();
 
-            container.createNewAgent("PhpAgent",
+            container.createNewAgent("php_agent",
                     "br.uerj.multiagentes.agentes.PhpAgent", null).start();
 
-            container.createNewAgent("MetricsAgent",
+            container.createNewAgent("metrics_agent",
                     "br.uerj.multiagentes.agentes.MetricsAgent", null).start();
 
-            container.createNewAgent("LlmAgent",
+            container.createNewAgent("llm_agent",
                     "br.uerj.multiagentes.agentes.LlmAgent", null).start();
 
         } catch (Exception e) {
