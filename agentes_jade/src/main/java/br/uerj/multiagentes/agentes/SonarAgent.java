@@ -5,15 +5,20 @@ import jade.core.Agent;
 import jade.core.AID;
 import jade.lang.acl.ACLMessage;
 
+import java.io.File;
 import java.io.FileWriter;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.util.HashMap;
 import java.util.Map;
 
 public class SonarAgent extends Agent {
 
     private final Gson gson = new Gson();
+    private final HttpClient http = HttpClient.newHttpClient();
+    private static final String WORKER_URL = System.getenv().getOrDefault("SONAR_WORKER_URL", "http://sonar-worker:9100/scan");
 
     @Override
     protected void setup() {
@@ -29,51 +34,46 @@ public class SonarAgent extends Agent {
                 }
 
                 try {
-                    if (msg.getPerformative() != ACLMessage.REQUEST)
-                        return;
+                    if (msg.getPerformative() == ACLMessage.REQUEST && "RUN_SONAR".equals(msg.getOntology())) {
 
-                    Map payload = gson.fromJson(msg.getContent(), Map.class);
-                    if (payload == null) return;
+                        Map payload = gson.fromJson(msg.getContent(), Map.class);
+                        String runId = (String) payload.get("run_id");
+                        String repoPath = (String) payload.get("repo_path");
 
-                    String runId = (String) payload.get("run_id");
-                    String repoPath = (String) payload.get("repo_path");
+                        System.out.println("[SonarAgent] Running sonar for run=" + runId + " path=" + repoPath);
 
-                    System.out.println("[SonarAgent] Running sonar for run=" + runId + " path=" + repoPath);
+                        // call worker
+                        Map<String, Object> body = new HashMap<>();
+                        body.put("run_id", runId);
+                        body.put("repo_path", repoPath);
 
-                    // -------------------------------------
-                    // 1) Executar sonar-scanner no container
-                    // -------------------------------------
-                    String cmd =
-                            "docker exec sonar_scanner sonar-scanner " +
-                            "-Dsonar.projectBaseDir=/usr/src/repo";
+                        HttpRequest request = HttpRequest.newBuilder()
+                                .uri(URI.create("http://sonar-worker:9100/scan"))
+                                .header("Content-Type", "application/json")
+                                .POST(HttpRequest.BodyPublishers.ofString(
+                                        gson.toJson(Map.of(
+                                                "repo_path", repoPath,
+                                                "run_id", runId
+                                        ))
+                                ))
+                                .build();
 
-                    System.out.println("[SonarAgent] Exec: " + cmd);
+                        HttpResponse<String> resp = http.send(request, HttpResponse.BodyHandlers.ofString());
 
-                    ProcessBuilder pb = new ProcessBuilder("bash", "-c", cmd);
-                    pb.redirectErrorStream(true);
-                    Process process = pb.start();
+                        System.out.println("[SonarAgent] Worker status: " + resp.statusCode());
+                        System.out.println("[SonarAgent] Worker body: " + resp.body());
 
-                    String output = new String(process.getInputStream().readAllBytes());
-                    int exit = process.waitFor();
+                        // notify QaAgent
+                        Map<String, Object> done = new HashMap<>();
+                        done.put("run_id", runId);
+                        done.put("agent", "sonar");
 
-                    System.out.println("[SonarAgent] Scanner output:\n" + output);
-
-                    if (exit != 0) {
-                        System.err.println("[SonarAgent] Scanner failed (exit=" + exit + ")");
+                        ACLMessage doneMsg = new ACLMessage(ACLMessage.INFORM);
+                        doneMsg.addReceiver(new AID("qa_agent", AID.ISLOCALNAME));
+                        doneMsg.setOntology("QA_SUBTASK_DONE");
+                        doneMsg.setContent(gson.toJson(done));
+                        send(doneMsg);
                     }
-
-                    // -------------------------------------
-                    // 2) Enviar resposta para o QaAgent
-                    // -------------------------------------
-                    ACLMessage reply = new ACLMessage(ACLMessage.INFORM);
-                    reply.addReceiver(new AID("QaAgent", AID.ISLOCALNAME));
-                    reply.setContent(gson.toJson(Map.of(
-                            "run_id", runId,
-                            "agent", "sonar",
-                            "status", "OK"
-                    )));
-                    send(reply);
-
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
