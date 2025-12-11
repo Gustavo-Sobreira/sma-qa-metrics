@@ -24,9 +24,9 @@ public class CoordinatorAgent extends Agent {
 
     @Override
     protected void setup() {
-        System.out.println("[CoordinatorAgent] REPOS_DIR = " + REPOS_DIR);
         startHttpServer(8090);
-        System.out.println("[CoordinatorAgent] Ready. Webhook at 0.0.0.0:8090/webhook");
+        System.out.println("[ 🧠 - CoordinatorAgent ]\n     |-> REPOS_DIR = " + REPOS_DIR
+                + "\n     |-> Escutando na 8090/webhook\n     |-> Pronto");
     }
 
     private void startHttpServer(int port) {
@@ -61,12 +61,14 @@ public class CoordinatorAgent extends Agent {
             File repoDir = new File(REPO_PATH);
             if (repoDir.exists() && new File(REPO_PATH + "/.git").exists()) {
                 log = runGitPull(REPO_PATH);
-                System.out.println("[CoordinatorAgent] git pull executed.");
+                System.out.println(
+                        "[ 🧠 - CoordinatorAgent ]\n     |-> Projeto existente.\n     |-> git pull concluído.");
             } else {
                 deleteDirectory(repoDir);
                 repoDir.mkdirs();
                 log = runGitClone(repoUrl, REPO_PATH);
-                System.out.println("[CoordinatorAgent] git clone executed.");
+                System.out.println(
+                        "[ 🧠 - CoordinatorAgent ]\n     |->  Novo projeto detectado.\n     |-> git clone concluído.");
             }
 
             JSONObject response = new JSONObject();
@@ -80,7 +82,7 @@ public class CoordinatorAgent extends Agent {
                 response.put("msg", "repo updated");
 
                 String runId = UUID.randomUUID().toString();
-                sendToQaAgent(runId, REPO_PATH);
+                sendToMetricsAgents(runId, REPO_PATH);
             }
 
             byte[] respBytes = response.toString().getBytes();
@@ -90,24 +92,45 @@ public class CoordinatorAgent extends Agent {
         }
     }
 
-    private void sendToQaAgent(String runId, String repoPath) {
+    private void sendToMetricsAgents(String runId, String repoPath) {
         try {
             Map<String, Object> payload = new HashMap<>();
             payload.put("run_id", runId);
             payload.put("repo_path", repoPath);
 
-            jade.lang.acl.ACLMessage msg =
-                    new jade.lang.acl.ACLMessage(jade.lang.acl.ACLMessage.INFORM);
+            jade.lang.acl.ACLMessage msg = new jade.lang.acl.ACLMessage(jade.lang.acl.ACLMessage.INFORM);
 
             msg.addReceiver(new AID("qa_agent", AID.ISLOCALNAME));
             msg.setOntology("Repo-Cloned");
             msg.setContent(new JSONObject(payload).toString());
             send(msg);
 
-            System.out.println("[CoordinatorAgent] Sent to QaAgent: run=" + runId);
+            System.out.println("[ 🧠 - CoordinatorAgent ]\n     |->  Projeto enviado ao CodeAnalyzerAgent.");
 
         } catch (Exception e) {
-            System.err.println("[CoordinatorAgent] Error sending to QaAgent: " + e.getMessage());
+            System.err.println("[ 🧠 - CoordinatorAgent ]\n     |->  Erro ao enviar projeto ao CodeAnalyzerAgent. \n "
+                    + e.getMessage());
+            e.printStackTrace();
+        }
+
+        try {
+            Map<String, Object> gitPayload = new HashMap<>();
+            gitPayload.put("type", "NEW_REPO");
+            gitPayload.put("run_id", runId);
+            gitPayload.put("repo_path", repoPath);
+
+            jade.lang.acl.ACLMessage gitMsg = new jade.lang.acl.ACLMessage(jade.lang.acl.ACLMessage.INFORM);
+
+            gitMsg.addReceiver(new AID("git_log_agent", AID.ISLOCALNAME));
+            gitMsg.setContent(new JSONObject(gitPayload).toString());
+
+            send(gitMsg);
+
+            System.out.println("[ 🧠 - CoordinatorAgent ]\n     |->  Projeto enviado ao GitLogAgent.");
+
+        } catch (Exception e) {
+            System.err.println(
+                    "[ 🧠 - CoordinatorAgent ]\n     |->  Erro ao enviar projeto ao GitLogAgent\n " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -155,13 +178,16 @@ public class CoordinatorAgent extends Agent {
     }
 
     private void deleteDirectory(File dir) {
-        if (!dir.exists()) return;
+        if (!dir.exists())
+            return;
 
         File[] files = dir.listFiles();
         if (files != null) {
             for (File f : files) {
-                if (f.isDirectory()) deleteDirectory(f);
-                else f.delete();
+                if (f.isDirectory())
+                    deleteDirectory(f);
+                else
+                    f.delete();
             }
         }
 

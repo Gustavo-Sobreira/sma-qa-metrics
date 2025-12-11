@@ -1,170 +1,154 @@
 package br.uerj.multiagentes.agentes;
 
 import com.google.gson.Gson;
-import com.mongodb.client.MongoCollection;
-import com.mongodb.client.MongoCursor;
-import com.mongodb.client.MongoDatabase;
-import br.uerj.multiagentes.utils.MongoHelper;
 import jade.core.Agent;
 import jade.core.AID;
 import jade.lang.acl.ACLMessage;
-import jade.core.behaviours.TickerBehaviour;
-import org.bson.Document;
+import jade.lang.acl.MessageTemplate;
 
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.net.HttpURLConnection;
+import java.net.URL;
+
 import java.util.Map;
-
+import java.util.concurrent.ConcurrentHashMap;
 
 public class LlmAgent extends Agent {
-    private Gson gson = new Gson();
+
+    private final Gson gson = new Gson();
+
+    private final Map<String, Boolean> qaDone = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> gitDone = new ConcurrentHashMap<>();
 
     @Override
     protected void setup() {
-        System.out.println("[LlmAgent] Ready.");
+        System.out.println("[ 🤖 - LlmAgent ]\n     |->  Pronto.");
 
-        addBehaviour(new TickerBehaviour(this, 10_000) {
+        addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
+
             @Override
-            protected void onTick() {
+            public void action() {
+
+                MessageTemplate mt = MessageTemplate.MatchPerformative(ACLMessage.INFORM);
+                ACLMessage msg = myAgent.receive(mt);
+
+                if (msg == null) {
+                    block();
+                    return;
+                }
+
                 try {
-                    processPendingRuns();
+                    String ontology = msg.getOntology();
+                    String content = msg.getContent();
+
+                    Map payload = gson.fromJson(content, Map.class);
+                    String runId = (String) payload.get("run_id");
+
+                    if (runId == null) {
+                        System.out.println("[ 🤖 - LlmAgent ] Mensagem ignorada: payload sem run_id");
+                        return;
+                    }
+
+                    if ("GIT_METRICS_DONE".equals(ontology)) {
+                        gitDone.put(runId, true);
+                        System.out.println("[ 🤖 - LlmAgent ]\n     |->  Dados recebidos de GitLogAgent.");
+                    }
+
+                    if ("QA_COMPLETED".equals(ontology)) {
+                        qaDone.put(runId, true);
+                        System.out.println("[ 🤖 - LlmAgent ]\n     |->  Dados recebidos de CodeAnalyzerAgent.");
+                    }
+
+                    if (qaDone.getOrDefault(runId, false) &&
+                            gitDone.getOrDefault(runId, false)) {
+
+                        System.out.println(
+                                "[ 🤖 - LlmAgent ]\n     |->  Dados todos dados recebidos, iniciando análise. Aguarde . . .");
+
+                        startAnalysis(runId);
+                    }
+
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
             }
         });
-
-        addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
-            @Override
-            public void action() {
-                ACLMessage msg = myAgent.receive();
-                if (msg != null) {
-                    try {
-                        String content = msg.getContent();
-                        System.out.println("[LlmAgent] Received message: " + content);
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                    }
-                } else {
-                    block();
-                }
-            }
-        });
     }
 
-    private void processPendingRuns() {
-        MongoDatabase db = MongoHelper.getDatabase();
-        MongoCollection<Document> runs = db.getCollection("run_status");
+    private void startAnalysis(String runId) {
+        try {
 
-        Document filter = new Document("metrics_done", true)
-                .append("llm_done", new Document("$ne", true))
-                .append("$or", List.of(new Document("php_done", true), new Document("sonar_done", true)));
+            System.out.println("[ 🤖 - LlmAgent ] Lendo métricas no MongoDB...");
 
-        MongoCursor<Document> cursor = runs.find(filter).iterator();
-        List<Document> toProcess = new ArrayList<>();
-        while (cursor.hasNext()) {
-            toProcess.add(cursor.next());
-        }
-        cursor.close();
+            Map<String, Object> allMetrics = Map.of(
+                    "run_id", runId,
+                    "qa_metrics", "aqui vão métricas reais do QA",
+                    "git_metrics", "aqui vão as métricas de LOC e NALOC");
 
-        for (Document run : toProcess) {
-            try {
-                String runId = run.getString("run_id");
-                System.out.println("[LlmAgent] Processing run: " + runId);
+            String prompt = "Analise as seguintes métricas de qualidade e git:\n\n"
+                    + gson.toJson(allMetrics)
+                    + "\n\nForneça um resumo técnico objetivo.";
 
-                MongoCollection<Document> metricsCol = db.getCollection("metrics");
-                Document metrics = metricsCol.find(new Document("run_id", runId)).first();
+            String llmResponse = callOllama(prompt);
 
-                MongoCollection<Document> phpCol = db.getCollection("phpmetrics_runs");
-                Document php = phpCol.find(new Document("run_id", runId)).first();
+            System.out.println("\n\n==============================================");
+            System.out.println("📊  RESULTADO DA ANÁLISE LLM (run_id = " + runId + ")");
+            System.out.println("==============================================\n");
+            System.out.println(llmResponse);
+            System.out.println("==============================================\n");
 
-                MongoCollection<Document> sonarCol = db.getCollection("sonar_runs");
-                Document sonar = sonarCol.find(new Document("run_id", runId)).first();
+            ACLMessage out = new ACLMessage(ACLMessage.INFORM);
+            out.addReceiver(new AID("coordinator_agent", AID.ISLOCALNAME));
+            out.setOntology("LLM_ANALYSIS_COMPLETE");
+            out.setContent(gson.toJson(Map.of(
+                    "run_id", runId,
+                    "result", llmResponse)));
 
-                Document summary = generateSummary(run, metrics, php, sonar);
+            send(out);
 
-                MongoCollection<Document> finalCol = db.getCollection("analysis_final");
-                Document finalDoc = new Document("run_id", runId)
-                        .append("repo", run.getString("repo"))
-                        .append("summary", summary.getString("summary_text"))
-                        .append("scores", summary.get("scores"))
-                        .append("metadata", new Document("metrics", metrics != null)
-                                .append("phpmetrics", php != null)
-                                .append("sonar", sonar != null))
-                        .append("generated_at", Instant.now().toString());
-                finalCol.insertOne(finalDoc);
+            System.out.println("[ 🤖 - LlmAgent ]\n     |->  Análise enviada ao CoordinatorAgent.");
 
-                runs.updateOne(new Document("run_id", runId), new Document("$set",
-                        new Document("llm_done", true).append("llm_at", Instant.now().toString())));
-
-                ACLMessage notify = new ACLMessage(ACLMessage.INFORM);
-                notify.addReceiver(new AID("coordinator", AID.ISLOCALNAME));
-                notify.setContent(gson.toJson(Map.of("type", "LLM_SUMMARY_DONE", "run_id", runId)));
-                send(notify);
-
-                System.out.println("[LlmAgent] Summary generated and persisted for run=" + runId);
-
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 
-    private Document generateSummary(Document run, Document metrics, Document php, Document sonar) {
-        StringBuilder sb = new StringBuilder();
-        Map<String, Object> scores = new HashMap<>();
+    private String callOllama(String prompt) throws Exception {
 
-        sb.append("Run: ").append(run.getString("run_id")).append("");
-        sb.append("Repo: ").append(run.getString("repo")).append("");
+        URL url = new URL("http://ollama:11434/api/generate");
+        HttpURLConnection con = (HttpURLConnection) url.openConnection();
 
-        if (metrics != null) {
-            Integer totalCommits = metrics.getInteger("total_commits", 0);
-            sb.append("Total commits (scanned): ").append(totalCommits).append("");
-            sb.append("Commits by author:").append(metrics.get("commits_by_author")).append("// ");
-            scores.put("activity", Math.min(1.0, totalCommits / 100.0));
-        } else {
-            sb.append("No git metrics found.");
-            scores.put("activity", 0.0);
+        con.setRequestMethod("POST");
+        con.setRequestProperty("Content-Type", "application/json");
+        con.setDoOutput(true);
+
+        String model = "llama3";
+
+        String body = gson.toJson(Map.of(
+                "model", model,
+                "prompt", prompt,
+                "stream", false));
+
+        OutputStreamWriter writer = new OutputStreamWriter(con.getOutputStream());
+        writer.write(body);
+        writer.flush();
+        writer.close();
+
+        BufferedReader reader = new BufferedReader(new InputStreamReader(con.getInputStream()));
+
+        StringBuilder response = new StringBuilder();
+        String line;
+
+        while ((line = reader.readLine()) != null) {
+            response.append(line);
         }
 
-        if (php != null) {
-            sb.append("PHPMetrics: report available. Exit code:").append(php.getInteger("exit_code", -1)).append("");
-            String reportPath = php.getString("json_report");
-            if (reportPath != null) {
-                sb.append("PHPMetrics JSON: ").append(reportPath).append("");
-            }
-            scores.put("php_quality", php.getInteger("exit_code", 1) == 0 ? 0.7 : 0.2);
-        } else {
-            sb.append("No phpmetrics result found.");
-            scores.put("php_quality", 0.0);
-        }
+        reader.close();
 
-        if (sonar != null) {
-            sb.append("Sonar: exit code: ").append(sonar.getInteger("exit_code",
-                    -1)).append("");
-            sb.append("Sonar raw output length: ")
-                    .append(sonar.getString("output") == null ? 0 : sonar.getString("output").length())
-                    .append(" chars");
-            scores.put("code_quality", sonar.getInteger("exit_code", 1) == 0 ? 0.6 : 0.3);
-        } else {
-            sb.append("No sonar data found.");
-            scores.put("code_quality", 0.0);
-        }
-        double activity = ((Number) scores.getOrDefault("activity",
-                0.0)).doubleValue();
-        double phpq = ((Number) scores.getOrDefault("php_quality",
-                0.0)).doubleValue();
-        double codeq = ((Number) scores.getOrDefault("code_quality",
-                0.0)).doubleValue();
-        double overall = (activity * 0.3) + (phpq * 0.3) + (codeq * 0.4);
-        scores.put("overall", overall);
+        Map resp = gson.fromJson(response.toString(), Map.class);
 
-        sb.append("Overall heuristic score: ").append(String.format("%.2f", overall)).append("");
-
-        Document summary = new Document("summary_text", sb.toString())
-                .append("scores", new Document(scores));
-        return summary;
+        return (String) resp.getOrDefault("response", "");
     }
 }

@@ -1,13 +1,13 @@
-# JADE CI/CD Agents (Coordinator, QaAgent, MetricsAgent)
+# JADE CI/CD Agents (Coordinator, CodeAnalyzerAgent, GitLogAgent)
 
 Este projeto contém uma solução completa para:
 
 - GitHub Actions que notifica o CoordinatorAgent a cada push.
 - CoordinatorAgent clona o repo, identifica o último commit, envia:
-  - QaAgent: apenas os arquivos alterados no último commit;
-  - MetricsAgent: todo o git log do projeto.
-- QaAgent executa phpmetrics e sonar-scanner, salva os resultados em PostgreSQL.
-- MetricsAgent analisa git log (commits por autor) e salva em PostgreSQL.
+  - CodeAnalyzerAgent: apenas os arquivos alterados no último commit;
+  - GitLogAgent: todo o git log do projeto.
+- CodeAnalyzerAgent executa phpmetrics e sonar-scanner, salva os resultados em PostgreSQL.
+- GitLogAgent analisa git log (commits por autor) e salva em PostgreSQL.
 - Infra via docker-compose (Postgres, SonarQube, agents container).
 
 ## Como usar (resumido)

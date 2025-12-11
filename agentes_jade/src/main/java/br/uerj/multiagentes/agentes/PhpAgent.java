@@ -25,17 +25,15 @@ public class PhpAgent extends Agent {
 
     private static final String WORKER_URL = System.getenv().getOrDefault(
             "PHPMETRICS_WORKER_URL",
-            "http://phpmetrics-worker:9200/scan"
-    );
+            "http://phpmetrics-worker:9200/scan");
 
     private static final String MONGO_URI = System.getenv().getOrDefault(
             "MONGO_URI",
-            "mongodb://mongo:27017"
-    );
+            "mongodb://mongo:27017");
 
     @Override
     protected void setup() {
-        System.out.println("[PhpAgent] Ready. Worker: " + WORKER_URL);
+        System.out.println("[PhpAgent] Pronto. Worker: " + WORKER_URL);
 
         try {
             mongo = MongoClients.create(MONGO_URI);
@@ -52,7 +50,10 @@ public class PhpAgent extends Agent {
             public void action() {
 
                 ACLMessage msg = myAgent.receive();
-                if (msg == null) { block(); return; }
+                if (msg == null) {
+                    block();
+                    return;
+                }
 
                 String runId = null;
                 String repoPath = null;
@@ -60,7 +61,7 @@ public class PhpAgent extends Agent {
                 try {
 
                     if (msg.getPerformative() == ACLMessage.REQUEST &&
-                        "RUN_PHPMETRICS".equals(msg.getOntology())) {
+                            "RUN_PHPMETRICS".equals(msg.getOntology())) {
 
                         Map payload = gson.fromJson(msg.getContent(), Map.class);
                         runId = (String) payload.get("run_id");
@@ -79,16 +80,13 @@ public class PhpAgent extends Agent {
                                 .build();
 
                         HttpResponse<String> resp = http.send(request,
-                                HttpResponse.BodyHandlers.ofString()
-                        );
+                                HttpResponse.BodyHandlers.ofString());
 
-                        Map<String, Object> workerResp =
-                                gson.fromJson(resp.body(), Map.class);
+                        Map<String, Object> workerResp = gson.fromJson(resp.body(), Map.class);
 
                         String stdout = (String) workerResp.get("stdout");
 
-                        Map<String, Object> parsedMetrics =
-                                parsePhpmetricsOutput(stdout);
+                        Map<String, Object> parsedMetrics = parsePhpmetricsOutput(stdout);
 
                         Document doc = new Document()
                                 .append("run_id", runId)
@@ -103,16 +101,13 @@ public class PhpAgent extends Agent {
                         for (String section : parsedMetrics.keySet()) {
                             String key = section.toLowerCase().replace(" ", "_");
                             doc.append(key, Document.parse(
-                                    gson.toJson(parsedMetrics.get(section))
-                            ));
+                                    gson.toJson(parsedMetrics.get(section))));
                         }
 
                         if (workerResp.get("report_json") != null) {
                             doc.append("report_json",
                                     Document.parse(
-                                            gson.toJson(workerResp.get("report_json"))
-                                    )
-                            );
+                                            gson.toJson(workerResp.get("report_json"))));
                         }
 
                         collection.insertOne(doc);
@@ -171,7 +166,8 @@ public class PhpAgent extends Agent {
         for (String raw : lines) {
             String line = raw.strip();
 
-            if (line.isEmpty()) continue;
+            if (line.isEmpty())
+                continue;
 
             boolean isSection = false;
             for (String s : sections) {
@@ -186,7 +182,8 @@ public class PhpAgent extends Agent {
                 }
             }
 
-            if (isSection || current == null) continue;
+            if (isSection || current == null)
+                continue;
 
             String[] parts = line.split("\\s{2,}");
             if (parts.length == 2) {

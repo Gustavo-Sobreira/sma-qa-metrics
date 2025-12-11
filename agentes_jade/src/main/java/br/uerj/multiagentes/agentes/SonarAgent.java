@@ -18,11 +18,12 @@ public class SonarAgent extends Agent {
 
     private final Gson gson = new Gson();
     private final HttpClient http = HttpClient.newHttpClient();
-    private static final String WORKER_URL = System.getenv().getOrDefault("SONAR_WORKER_URL", "http://sonar-worker:9100/scan");
+    private static final String WORKER_URL = System.getenv().getOrDefault("SONAR_WORKER_URL",
+            "http://sonar-worker:9100/scan");
 
     @Override
     protected void setup() {
-        System.out.println("[SonarAgent] Ready.");
+        System.out.println("[ 🐳 - SonarAgent ]\n     |->  Pronto.");
 
         addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
             @Override
@@ -40,9 +41,10 @@ public class SonarAgent extends Agent {
                         String runId = (String) payload.get("run_id");
                         String repoPath = (String) payload.get("repo_path");
 
-                        System.out.println("[SonarAgent] Running sonar for run=" + runId + " path=" + repoPath);
+                        System.out.println(
+                                "[ 🐳 - SonarAgent - ⌛]\n     |->  O SonarQube está processando os dados de " + repoPath
+                                        + " aguarde . . .");
 
-                        // call worker
                         Map<String, Object> body = new HashMap<>();
                         body.put("run_id", runId);
                         body.put("repo_path", repoPath);
@@ -53,17 +55,13 @@ public class SonarAgent extends Agent {
                                 .POST(HttpRequest.BodyPublishers.ofString(
                                         gson.toJson(Map.of(
                                                 "repo_path", repoPath,
-                                                "run_id", runId
-                                        ))
-                                ))
+                                                "run_id", runId))))
                                 .build();
 
                         HttpResponse<String> resp = http.send(request, HttpResponse.BodyHandlers.ofString());
 
-                        System.out.println("[SonarAgent] Worker status: " + resp.statusCode());
-                        System.out.println("[SonarAgent] Worker body: " + resp.body());
+                        System.out.println("[ 🐳 - SonarAgent ]\n     |->  Worker status: " + resp.statusCode());
 
-                        // notify QaAgent
                         Map<String, Object> done = new HashMap<>();
                         done.put("run_id", runId);
                         done.put("agent", "sonar");

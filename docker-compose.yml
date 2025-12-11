@@ -12,6 +12,7 @@ services:
       MONGO_URI: mongodb://mongo:27017
       SONAR_URL: http://sonarqube:9000
       SONAR_TOKEN: ${SONAR_TOKEN}
+      SONAR_PROJECT: ${SONAR_PROJECT}
     volumes:
       - repos_shared:/repos
     restart: unless-stopped
@@ -98,7 +99,18 @@ services:
     networks:
       - agents_net
 
-
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    networks:
+      - agents_net
 
 
 
@@ -108,6 +120,8 @@ networks:
 
 volumes:
   mongo_data:
+
+  ollama_data:
 
   postgresql:
   postgresql_data:
