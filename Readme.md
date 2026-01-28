@@ -4,8 +4,10 @@
 
 
 # Rodar
-docker compose down &&
-docker compose --env-file .env up -d 
+docker compose down
+docker system prune -f
+docker compose --env-file .env up -d
+
 
 # Após subir
 curl -X POST http://localhost:8090/webhook \

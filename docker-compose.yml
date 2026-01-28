@@ -1,84 +1,129 @@
-services:
+name: sma-qa-metrics
 
+services:
   jade:
-    container_name: jade
+    container_name: ${JADE_CONTAINER_NAME:-jade}
     build:
       context: ./agentes_jade
       dockerfile: Dockerfile
-    ports:
-      - "8080:8080"
-      - "8090:8090"
+    env_file:
+      - .env
     environment:
-      MONGO_URI: mongodb://mongo:27017
-      SONAR_URL: http://sonarqube:9000
+      URI_MONGO: ${URI_MONGO:-mongodb://mongo:27017}
+
+      # Sonar
+      URL_SONAR: ${URL_SONAR:-http://sonarqube:9000}
       SONAR_TOKEN: ${SONAR_TOKEN}
-      SONAR_PROJECT: ${SONAR_PROJECT}
+      SONAR_PROJECT: ${SONAR_PROJECT:-sma-project}
+      PORT_WEBHOOK: ${PORT_WEBHOOK:-8090}
+
+      # LLM (Ollama)
+      # LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      # URL_OLLAMA: ${URL_OLLAMA:-http://ollama:11434}
+      # OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
+
+      # LLM (Gemini)
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3-flash-preview}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/chat/completions}
+
+    ports:
+      - "${PORT_JADE:-8080}:8080"
+      - "${PORT_WEBHOOK:-8090}:${PORT_WEBHOOK:-8090}"
     volumes:
       - repos_shared:/repos
     restart: unless-stopped
     networks:
       - agents_net
     depends_on:
-      - mongo
-      - sonar-worker
-      - phpmetrics-worker
+      mongo:
+        condition: service_healthy
+      sonar-worker:
+        condition: service_started
+      # ollama:
+      #   condition: service_healthy
 
   mongo:
     image: mongo:7.0.26-jammy
-    container_name: mongo
-    restart: always
+    container_name: ${MONGO_CONTAINER_NAME:-mongo}
+    restart: unless-stopped
+    env_file:
+      - .env
     ports:
-      - "27017:27017"
+      - "${PORT_MONGO:-27017}:27017"
     networks:
       - agents_net
     volumes:
       - mongo_data:/data/db
-
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' localhost:27017 | grep 1 >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
   postgres:
-    container_name: postgres
     image: postgres:16.11-alpine3.23
-    ports:
-      - "5432:5432"
-    networks:
-      - agents_net
+    container_name: ${POSTGRES_CONTAINER_NAME:-postgres}
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - postgresql:/var/lib/postgresql
-      - postgresql_data:/var/lib/postgresql/data
-
-  sonarqube:
-    container_name: sonarqube
-    image: sonarqube:25.11.0.114957-community
     ports:
-      - "9000:9000"
+      - "${PORT_POSTGRES:-5432}:5432"
     networks:
       - agents_net
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  sonarqube:
+    image: sonarqube:25.11.0.114957-community
+    container_name: ${SONARQUBE_CONTAINER_NAME:-sonarqube}
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      SONAR_JDBC_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      URI_SONAR_JDBC: ${URI_SONAR_JDBC:-jdbc:postgresql://postgres:5432/${POSTGRES_DB}}
       SONAR_JDBC_USERNAME: ${POSTGRES_USER}
       SONAR_JDBC_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${PORT_SONARQUBE:-9000}:9000"
+    networks:
+      - agents_net
     volumes:
       - sonarqube_conf:/opt/sonarqube/conf
       - sonarqube_data:/opt/sonarqube/data
       - sonarqube_extensions:/opt/sonarqube/extensions
       - sonarqube_logs:/opt/sonarqube/logs
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/api/system/status"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"'"]
       interval: 10s
       timeout: 5s
-      retries: 20
-  
+      retries: 40
+
   sonar-worker:
     build: ./workers/sonar-worker
-    container_name: sonar-worker
+    container_name: ${SONAR_WORKER_CONTAINER_NAME:-sonar-worker}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      URL_SONAR: ${URL_SONAR:-http://sonarqube:9000}
+      SONAR_TOKEN: ${SONAR_TOKEN}
+      SONAR_PROJECT: ${SONAR_PROJECT:-sma-project}
     ports:
-      - "9100:9100"
+      - "${PORT_SONAR_WORKER:-9100}:9100"
     volumes:
       - repos_shared:/repos
     networks:
@@ -86,33 +131,49 @@ services:
     depends_on:
       sonarqube:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9100/ >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
 
-  phpmetrics-worker:
-    container_name: phpmetrics-worker
-    build: ./workers/phpmetrics-worker
-    ports:
-      - "9200:9200"
-    volumes:
-      - repos_shared:/repos
-    environment:
-      - FLASK_ENV=production
-    networks:
-      - agents_net
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    environment:
-      - OLLAMA_KEEP_ALIVE=24h
-    networks:
-      - agents_net
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: ${OLLAMA_CONTAINER_NAME:-ollama}
+  #   restart: unless-stopped
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-24h}
+  #     OLLAMA_HOST: 0.0.0.0:11434
+  #   ports:
+  #     - "${PORT_OLLAMA:-11434}:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   networks:
+  #     - agents_net
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 60
+  #     start_period: 20s
 
 
+  # ollama-pull:
+  #   image: ollama/ollama:latest
+  #   container_name: ${OLLAMA_PULL_CONTAINER_NAME:-ollama-pull}
+  #   depends_on:
+  #     ollama:
+  #       condition: service_healthy
+  #   networks:
+  #     - agents_net
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   restart: "no"
+  #   environment:
+  #     OLLAMA_HOST: http://ollama:11434
+  #   command: ["pull", "${OLLAMA_MODEL:-llama3}"]
 
 networks:
   agents_net:
@@ -120,33 +181,10 @@ networks:
 
 volumes:
   mongo_data:
-
-  ollama_data:
-
-  postgresql:
   postgresql_data:
-
   repos_shared:
-
   sonarqube_conf:
   sonarqube_data:
   sonarqube_extensions:
   sonarqube_logs:
-
-
-
-
-# Deu trabalho pra funcionar kkkkkk deixar isso guradado
-  # sonar-scanner:
-  #   container_name: sonar_scanner
-  #   image: sonarsource/sonar-scanner-cli:12.0
-  #   networks:
-  #     - agents_net
-  #   volumes:
-  #     - repos_shared:/repos
-  #     - ./sonar-project.properties:/usr/src/sonar-project.properties
-  #   working_dir: /repos
-  #   entrypoint: ["tail", "-f", "/dev/null"] 
-  #   depends_on:
-  #     sonarqube:
-  #       condition: service_healthy
+  # ollama_data:
