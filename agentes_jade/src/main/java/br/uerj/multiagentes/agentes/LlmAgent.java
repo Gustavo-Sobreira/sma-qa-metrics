@@ -48,8 +48,7 @@ public class LlmAgent extends Agent {
 
     @Override
     protected void setup() {
-        System.out.println("[ 🤖 - LlmAgent ]\n     |->  Pronto. LLM_ENABLED=" + LLM_ENABLED
-                + " | provider=gemini model=" + GEMINI_MODEL);
+        System.out.println("[ LlmAgent ] - Pronto. Model=" + GEMINI_MODEL);
 
         addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
             @Override
@@ -59,7 +58,7 @@ public class LlmAgent extends Agent {
                 if (msg == null) { block(); return; }
 
                 if (!LLM_ENABLED) {
-                    System.out.println("[ 🤖 - LlmAgent ]\n     |->  LLM desabilitado. Ignorando RUN_LLM.");
+                    System.out.println("[ LlmAgent ] - LLM desabilitado. Ignorando RUN_LLM.");
                     return;
                 }
 
@@ -68,7 +67,7 @@ public class LlmAgent extends Agent {
                     Map payload = gson.fromJson(msg.getContent(), Map.class);
                     runId = String.valueOf(payload.get("run_id"));
 
-                    System.out.println("[ 🤖 - LlmAgent ]\n     |->  Iniciando análise (run=" + runId + ")");
+                    System.out.println("[ LlmAgent ] - Iniciando análise (run=" + runId + ")");
                     updateRunStatus(runId, "llm_status", "running", "llm_started_at", Instant.now().toString());
 
                     Document input = loadInputs(runId);
@@ -81,7 +80,7 @@ public class LlmAgent extends Agent {
 
                     sendLlmDone(runId);
 
-                    System.out.println("[ 🤖 - LlmAgent ]\n     |->  Concluído (run=" + runId + ")");
+                    System.out.println("[ LlmAgent ] - Concluído (run=" + runId + ")");
 
                 } catch (Exception e) {
                     String reason = e.getMessage() == null ? e.toString() : e.getMessage();
@@ -94,7 +93,7 @@ public class LlmAgent extends Agent {
                         sendLlmFailed(runId, reason);
                     }
 
-                    System.out.println("[ 🤖 - LlmAgent ]\n     |->  FALHOU (run=" + runId + ") error=" + reason);
+                    System.out.println("[ LlmAgent ] - FALHOU (run=" + runId + ") error=" + reason);
                 }
             }
         });
@@ -140,8 +139,10 @@ public class LlmAgent extends Agent {
                 + "Saída desejada:\n"
                 + "1) Sumário executivo (3-6 bullets)\n"
                 + "2) Achados principais (qualidade estática vs evolução do repo)\n"
-                + "3) Riscos e hipóteses (com evidências)\n"
-                + "4) Recomendações práticas priorizadas\n";
+                + "3) Métricas de projeto (LOC (Lines Of Code), NALOC (Non-Commented Lines of Code), frequência e ciclo de desenvolvimento))\n"
+                + "4) Métricas de código (Bugs.Vulnerabilidades e Code Smells)"
+                + "5) Riscos e hipóteses (com evidências)\n"
+                + "6) Recomendações práticas priorizadas\n";
     }
 
     private String callGemini(String prompt) throws IOException, InterruptedException {
@@ -149,8 +150,6 @@ public class LlmAgent extends Agent {
             throw new IOException("GEMINI_API_KEY não configurada");
         }
 
-        // Gemini aceita o formato "OpenAI chat/completions" via endpoint compatível.
-        // docs: Authorization: Bearer <GEMINI_API_KEY> :contentReference[oaicite:1]{index=1}
         Map body = Map.of(
                 "model", GEMINI_MODEL,
                 "messages", List.of(

@@ -32,24 +32,6 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * CoordinatorAgent (simplificado + robusto)
- *
- * Fluxo:
- * 1) /webhook recebe repo
- * 2) clona/pull
- * 3) envia REPO_READY para CodeAnalyzer e GitLog
- * 4) aguarda QA_DONE e GIT_DONE (ou falhas)
- * 5) dispara RUN_LLM (apenas uma vez)
- * 6) aguarda LLM_DONE/LLM_FAILED e finaliza run
- *
- * Robustez mantida:
- * - Barra de progresso (logs + Mongo)
- * - Parse tolerante de mensagens (não explode com string crua)
- * - Tratamento de falhas (QA/GIT/LLM)
- * - Evita re-disparo do LLM (llmTriggered)
- * - Descoberta via DF com fallback para nomes fixos
- */
 public class CoordinatorAgent extends Agent {
 
     private static final Gson gson = GsonProvider.get();
@@ -83,12 +65,8 @@ public class CoordinatorAgent extends Agent {
         AgentDirectory.register(this, "coordinator", "coordinator");
         startHttpServer(WEBHOOK_PORT);
 
-        System.out.println("[ 🧠 - CoordinatorAgent ]"
-                + "     |-> REPOS_DIR = " + REPOS_DIR
-                + "     |-> Escutando em /webhook (port=" + WEBHOOK_PORT + ")"
-                + "     |-> Pronto.");
+        System.out.println("[ CoordinatorAgent ] - REPOS_DIR = " + REPOS_DIR + "  - Pronto.");
 
-        // Barra de progresso periódica
         addBehaviour(new TickerBehaviour(this, TICK_MS) {
             @Override
             protected void onTick() {
@@ -108,7 +86,6 @@ public class CoordinatorAgent extends Agent {
             }
         });
 
-        // Loop de mensagens
         addBehaviour(new CyclicBehaviour() {
             @Override
             public void action() {
@@ -125,14 +102,12 @@ public class CoordinatorAgent extends Agent {
                 String runId = getRunId(payload);
 
                 if (runId == null) {
-                    System.out.println("[ 🧠 - CoordinatorAgent ] |-> Aviso: msg sem run_id (ontology="
-                            + ontology + ") content=" + preview(content));
+                    System.out.println("[ CoordinatorAgent ] - Aviso: msg sem run_id (ontology=" + ontology + ") content=" + preview(content));
                     return;
                 }
 
                 RunState s = runs.computeIfAbsent(runId, k -> new RunState());
 
-                // --- LLM finalizações ---
                 if ("LLM_DONE".equals(ontology)) {
                     s.llmOk = true;
                     s.stage = "LLM_DONE";
@@ -147,7 +122,7 @@ public class CoordinatorAgent extends Agent {
                             "progress_pct", s.pct,
                             "progress_at", Instant.now().toString());
 
-                    System.out.println("[ ✅ - RUN " + runId.substring(0, 8) + " ] Finalizado: LLM_DONE");
+                    System.out.println("[ RUN " + runId.substring(0, 8) + " ] Finalizado: LLM_DONE");
                     cleanup(runId);
                     return;
                 }
@@ -158,7 +133,6 @@ public class CoordinatorAgent extends Agent {
                     return;
                 }
 
-                // --- QA / GIT ---
                 if ("QA_DONE".equals(ontology)) {
                     s.qaOk = true;
                     s.stage = "QA_DONE";
@@ -166,7 +140,7 @@ public class CoordinatorAgent extends Agent {
                     s.lastMsg = "QA concluído";
 
                     setRun(runId, "qa_ok", true, "qa_completed_at", Instant.now().toString());
-                    System.out.println("[ 🧠 - CoordinatorAgent ]     |-> QA_DONE recebido (run=" + runId + ")");
+                    System.out.println("[ CoordinatorAgent ] - QA_DONE recebido (run=" + runId + ")");
                 }
 
                 if ("GIT_DONE".equals(ontology)) {
@@ -176,7 +150,7 @@ public class CoordinatorAgent extends Agent {
                     s.lastMsg = "Git concluído";
 
                     setRun(runId, "git_ok", true, "git_completed_at", Instant.now().toString());
-                    System.out.println("[ 🧠 - CoordinatorAgent ]     |-> GIT_DONE recebido (run=" + runId + ")");
+                    System.out.println("[ CoordinatorAgent ] - GIT_DONE recebido (run=" + runId + ")");
                 }
 
                 if ("QA_FAILED".equals(ontology) || "GIT_FAILED".equals(ontology)) {
@@ -185,21 +159,19 @@ public class CoordinatorAgent extends Agent {
                     return;
                 }
 
-                // --- barreira -> chama LLM uma vez ---
                 if (s.qaOk && s.gitOk && !s.failed && !s.llmTriggered) {
                     s.llmTriggered = true;
                     s.stage = "BARRIER_OK";
                     s.pct = Math.max(s.pct, 85);
                     s.lastMsg = "Barreira atingida";
 
-                    System.out.println("[ 🧠 - CoordinatorAgent ]     |-> Barreira atingida: chamando LlmAgent (run=" + runId + ")");
+                    System.out.println("[ CoordinatorAgent ] - Barreira atingida: chamando LlmAgent (run=" + runId + ")");
                     triggerLlm(runId, s);
                 }
             }
         });
     }
 
-    // ------------------ WEBHOOK ------------------
 
     private void startHttpServer(int port) {
         try {
@@ -285,7 +257,6 @@ public class CoordinatorAgent extends Agent {
                 "repo_path", repoPath
         );
 
-        // DF + fallback
         sendToService("code-analyzer", new AID("code_analyzer_agent", AID.ISLOCALNAME),
                 "REPO_READY", payload);
 
@@ -297,10 +268,7 @@ public class CoordinatorAgent extends Agent {
         s.pct = 25;
         s.lastMsg = "QA/Git em andamento...";
 
-        System.out.println("[ 🧠 - CoordinatorAgent ]"
-                + "     |-> Projeto enviado ao CodeAnalyzerAgent e GitLogAgent."
-                + "     |-> run_id=" + runId
-                + "     |-> repo_path=" + repoPath);
+        System.out.println("[ CoordinatorAgent ] - Iniciando análise do Projeto " + runId + " - " + repoPath);
     }
 
     private void triggerLlm(String runId, RunState s) {
@@ -332,8 +300,6 @@ public class CoordinatorAgent extends Agent {
         send(m);
     }
 
-    // ------------------ FAIL / STATE ------------------
-
     private void failRun(String runId, RunState s, String type, String reason) {
         s.failed = true;
         s.stage = "FAILED";
@@ -354,11 +320,7 @@ public class CoordinatorAgent extends Agent {
     }
 
     private void cleanup(String runId) {
-        // Mantém o RunState no map para logs/inspeção (simples e útil).
-        // Se quiser expirar, implemente TTL depois.
     }
-
-    // ------------------ PARSE / HELPERS ------------------
 
     private static String env(String k, String def) {
         String v = System.getenv(k);
@@ -441,8 +403,6 @@ public class CoordinatorAgent extends Agent {
 
         runsCol.updateOne(new Document("run_id", runId), new Document("$set", set));
     }
-
-    // ------------------ GIT ------------------
 
     private String runGitClone(String url, String path) {
         return runCommand(new ProcessBuilder("git", "clone", url, path));

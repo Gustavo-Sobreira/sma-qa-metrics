@@ -22,21 +22,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.URI;
 
-/**
- * Não remova meus comentários.
- *
- * CodeAnalyzerAgent:
- * - Recebe REPO_READY (run_id, repo_path)
- * - Dispara análises estáticas (por enquanto: Sonar)
- * - Quando todos subagentes concluírem, coleta métricas necessárias
- * - Persiste no Mongo
- * - Envia QA_DONE ao CoordinatorAgent
- *
- * MELHORIAS:
- * - DF para descoberta (tolerante a nomes)
- * - Trata QA_SUBTASK_FAILED e propaga QA_FAILED
- * - Só conclui se ok=true e persistência bem sucedida
- */
+
 public class CodeAnalyzerAgent extends Agent {
 
     private final Gson gson = GsonProvider.get();
@@ -49,7 +35,7 @@ public class CodeAnalyzerAgent extends Agent {
     protected void setup() {
         AgentDirectory.register(this, "code-analyzer", "code-analyzer");
 
-        System.out.println("[ 🧪 - CodeAnalyzerAgent ]\n     |->  Pronto.");
+        System.out.println("[ CodeAnalyzerAgent ] - Pronto.");
 
         addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
             @Override
@@ -74,7 +60,6 @@ public class CodeAnalyzerAgent extends Agent {
 
                         updateRun(runId, "qa_stage", "SONAR_RUNNING", "qa_started_at", Instant.now().toString());
 
-                        // Dispara Sonar (DF + fallback)
                         ACLMessage sonarReq = new ACLMessage(ACLMessage.REQUEST);
                         sonarReq.setOntology("RUN_SONAR");
                         sonarReq.setContent(gson.toJson(Map.of(
@@ -86,7 +71,6 @@ public class CodeAnalyzerAgent extends Agent {
                         if (sonarAgents != null && !sonarAgents.isEmpty()) {
                             sonarAgents.forEach(sonarReq::addReceiver);
                         } else {
-                            // compat com seu setup atual
                             sonarReq.addReceiver(new AID("sonar_agent", AID.ISLOCALNAME));
                         }
                         send(sonarReq);
@@ -125,7 +109,7 @@ public class CodeAnalyzerAgent extends Agent {
                         Set<String> done = doneAgents.computeIfAbsent(runId, k -> new HashSet<>());
                         done.add(agent);
 
-                        // Quando houver mais agentes, aumente o limiar aqui
+                        // TODO Ao adicionar mais agentes aumente o nº 1
                         if (done.size() >= 1 && !failedRuns.getOrDefault(runId, false)) {
                             updateRun(runId, "qa_stage", "PERSISTING", "qa_persist_started_at", Instant.now().toString());
 
@@ -177,7 +161,7 @@ public class CodeAnalyzerAgent extends Agent {
         )));
         send(notify);
 
-        System.out.println("[ 🧪 - CodeAnalyzerAgent ]\n     |->  QA_FAILED enviado (run=" + runId + ") reason=" + reason);
+        System.out.println("[ CodeAnalyzerAgent ] - QA_FAILED enviado (run=" + runId + ") reason=" + reason);
     }
 
     private void updateRun(String runId, String k1, Object v1, String k2, Object v2) {
@@ -198,7 +182,7 @@ public class CodeAnalyzerAgent extends Agent {
             String sonarJson = "{}";
 
             if (metricsList == null || metricsList.isBlank()) {
-                System.out.println("[ 🧪 - CodeAnalyzerAgent ]\n     |->  Nenhuma métrica encontrada no Sonar.");
+                System.out.println("[ CodeAnalyzerAgent ] - Nenhuma métrica encontrada no Sonar.");
             } else {
                 sonarJson = fetchAllMetrics(baseUrl, projectKey, metricsList);
             }
@@ -219,11 +203,11 @@ public class CodeAnalyzerAgent extends Agent {
 
             coll.insertOne(doc);
 
-            System.out.println("[ 🧪 - CodeAnalyzerAgent ]\n     |->  Métricas Sonar persistidas (run=" + runId + ")");
+            System.out.println("[ CodeAnalyzerAgent ] - Métricas Sonar persistidas (run=" + runId + ")");
             return true;
 
         } catch (Exception ex) {
-            System.out.println("[ 🧪 - CodeAnalyzerAgent ]\n     |->  Erro ao persistir métricas do Sonar: " + ex.getMessage());
+            System.out.println("[ CodeAnalyzerAgent ] - Erro ao persistir métricas do Sonar: " + ex.getMessage());
             ex.printStackTrace();
             return false;
         }

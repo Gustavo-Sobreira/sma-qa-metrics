@@ -35,7 +35,7 @@ public class SonarAgent extends Agent {
     protected void setup() {
         AgentDirectory.register(this, "sonar", "sonar");
 
-        System.out.println("[ 🐳 - SonarAgent ]\n     |->  Pronto. Worker=" + WORKER_URL);
+        System.out.println("[ SonarAgent ] - Pronto. Worker=" + WORKER_URL);
 
         addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
             @Override
@@ -55,7 +55,7 @@ public class SonarAgent extends Agent {
                 String repoPath = String.valueOf(payload.get("repo_path"));
 
                 try {
-                    System.out.println("[ 🐳 - SonarAgent - ⌛]\n     |->  Processando SonarQube para " + repoPath);
+                    System.out.println("[ SonarAgent ] - Processando SonarQube para " + repoPath);
 
                     String reqBody = gson.toJson(Map.of(
                             "repo_path", repoPath,
@@ -71,7 +71,6 @@ public class SonarAgent extends Agent {
                     HttpResponse<String> resp = http.send(request, HttpResponse.BodyHandlers.ofString());
                     String body = resp.body() == null ? "" : resp.body();
 
-                    // artefato bruto
                     saveArtifact(repoPath, body);
 
                     boolean httpOk = (resp.statusCode() >= 200 && resp.statusCode() < 300);
@@ -83,23 +82,21 @@ public class SonarAgent extends Agent {
                         String preview = preview(body);
                         failToCodeAnalyzer(runId, "sonar",
                                 "worker response is not JSON (http=" + resp.statusCode() + ") preview=" + preview);
-                        System.out.println("[ 🐳 - SonarAgent ]\n     |->  FALHOU. Resposta não-JSON do worker.");
+                        System.out.println("[ SonarAgent ] - FALHOU. Resposta não-JSON do worker.");
                         return;
                     }
 
-                    // ok
                     boolean ok = false;
                     Object okObj = worker.get("ok");
                     ok = Boolean.TRUE.equals(okObj) || "true".equalsIgnoreCase(String.valueOf(okObj));
 
-                    // exit_code (várias formas + fallback por regex no body)
                     Integer exitCode = extractExitCode(worker, body);
 
                     if (ok && exitCode == null) {
                         String preview = preview(body);
                         failToCodeAnalyzer(runId, "sonar",
                                 "worker ok=true but could not parse exit_code (http=" + resp.statusCode() + ") preview=" + preview);
-                        System.out.println("[ 🐳 - SonarAgent ]\n     |->  FALHOU. ok=true mas exit_code não pôde ser interpretado.");
+                        System.out.println("[ SonarAgent ] - FALHOU. ok=true mas exit_code não pôde ser interpretado.");
                         return;
                     }
 
@@ -108,7 +105,7 @@ public class SonarAgent extends Agent {
                     if (!(httpOk && ok && exit == 0)) {
                         String reason = "worker failed (http=" + resp.statusCode() + ", ok=" + ok + ", exit_code=" + exit + ")";
                         failToCodeAnalyzer(runId, "sonar", reason);
-                        System.out.println("[ 🐳 - SonarAgent ]\n     |->  FALHOU. " + reason + " (run=" + runId + ")");
+                        System.out.println("[ SonarAgent ] - FALHOU. " + reason + " (run=" + runId + ")");
                         return;
                     }
 
@@ -124,7 +121,7 @@ public class SonarAgent extends Agent {
                     )));
                     send(doneMsg);
 
-                    System.out.println("[ 🐳 - SonarAgent ]\n     |->  Concluído. ok=true exit_code=0 (run=" + runId + ")");
+                    System.out.println("[ SonarAgent ] - Concluído. ok=true exit_code=0 (run=" + runId + ")");
 
                 } catch (Exception e) {
                     failToCodeAnalyzer(runId, "sonar", e.getMessage());
@@ -135,17 +132,14 @@ public class SonarAgent extends Agent {
     }
 
     private Integer extractExitCode(Map worker, String body) {
-        // 1) tenta snake_case
         Object v = worker.get("exit_code");
         Integer parsed = parseIntLoose(v);
         if (parsed != null) return parsed;
 
-        // 2) tenta camelCase
         v = worker.get("exitCode");
         parsed = parseIntLoose(v);
         if (parsed != null) return parsed;
 
-        // 3) fallback: regex no body
         Matcher m = EXIT_CODE_PATTERN.matcher(body == null ? "" : body);
         if (m.find()) {
             try { return Integer.parseInt(m.group(1)); } catch (Exception ignored) {}

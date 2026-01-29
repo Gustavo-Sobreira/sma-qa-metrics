@@ -22,7 +22,6 @@ def scan():
 
     print(f"[sonar-worker] Running scan for: {repo_path}")
 
-    # Gerar sonar-project.properties dinamicamente (env + request)
     URL_SONAR = os.getenv("URL_SONAR", os.getenv("SONAR_HOST_URL", "http://sonarqube:9000"))
     sonar_token = os.getenv("SONAR_TOKEN") or data.get("sonar_token")
     sonar_project = os.getenv("SONAR_PROJECT") or data.get("sonar_project") or "sma-sonar-agent"
@@ -38,7 +37,6 @@ def scan():
 
     dst_prop = os.path.join(repo_path, "sonar-project.properties")
 
-    # IMPORTANTE: usar quebras de linha (\n), senão o arquivo fica inválido
     with open(dst_prop, "w", encoding="utf-8") as f:
         f.write(f"sonar.host.url={URL_SONAR}\n")
         f.write(f"sonar.token={sonar_token}\n")
@@ -63,7 +61,7 @@ def scan():
     try:
         result = subprocess.run(
             cmd,
-            cwd=repo_path,          # garante execução no repo
+            cwd=repo_path,          
             capture_output=True,
             text=True
         )
@@ -80,7 +78,6 @@ def scan():
 
         print(f"[sonar-worker] Scan finished: ok={payload['ok']} exit_code={payload['exit_code']} duration_ms={duration_ms}")
 
-        # Artefato local (ajuda MUITO para debug dentro do /repos)
         try:
             sma_dir = os.path.join(repo_path, ".sma", "sonar")
             os.makedirs(sma_dir, exist_ok=True)
@@ -89,7 +86,6 @@ def scan():
         except Exception as _:
             pass
 
-        # Se falhar, devolve 500 pra deixar bem evidente pro SonarAgent
         status = 200 if payload["ok"] else 500
         return jsonify(payload), status
 
@@ -107,7 +103,6 @@ def scan():
 
         print(f"[sonar-worker] Exception: {payload['error']}")
 
-        # Artefato local também no erro
         try:
             sma_dir = os.path.join(repo_path, ".sma", "sonar")
             os.makedirs(sma_dir, exist_ok=True)

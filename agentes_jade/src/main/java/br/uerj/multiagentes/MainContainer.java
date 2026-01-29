@@ -5,12 +5,6 @@ import jade.core.ProfileImpl;
 import jade.core.Runtime;
 import jade.wrapper.AgentContainer;
 
-/**
- * Bootstrap do contêiner principal JADE.
- *
- * Observação: os nomes locais (local-name) dos agentes são usados como endereços
- * na troca de mensagens (AID.ISLOCALNAME).
- */
 public class MainContainer {
 
     public static void main(String[] args) {

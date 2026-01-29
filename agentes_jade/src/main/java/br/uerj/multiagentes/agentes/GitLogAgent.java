@@ -20,16 +20,6 @@ import java.io.InputStreamReader;
 import java.time.Instant;
 import java.util.*;
 
-/**
- * GitLogAgent
- * - Varre o git log do projeto
- * - Calcula métricas necessárias (PoC: LOC/NALOC por commit via numstat)
- * - Salva no Mongo
- * - Dá ok ao CoordinatorAgent (GIT_DONE)
- *
- * MELHORIA:
- * - Em erro: GIT_FAILED
- */
 public class GitLogAgent extends Agent {
 
     private final Gson gson = GsonProvider.get();
@@ -38,7 +28,7 @@ public class GitLogAgent extends Agent {
     protected void setup() {
         AgentDirectory.register(this, "git-log", "git-log");
 
-        System.out.println("[ 📟 - GitLogAgent ]\n     |->  Pronto.");
+        System.out.println("[ GitLogAgent ] - Pronto.");
 
         addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
             @Override
@@ -60,7 +50,7 @@ public class GitLogAgent extends Agent {
                 String repoPath = String.valueOf(payload.get("repo_path"));
 
                 try {
-                    System.out.println("[ 📟 - GitLogAgent - ⌛]\n     |->  Processando métricas de repositório (run=" + runId + ")");
+                    System.out.println("[ GitLogAgent ] - Processando métricas de repositório (run=" + runId + ")");
 
                     Map<String, Object> locMetrics = calcularLOCporCommit(repoPath);
 
@@ -83,7 +73,7 @@ public class GitLogAgent extends Agent {
                                             .append("git_metrics_finished_at", Instant.now().toString())
                                             .append("git_ok", true)));
 
-                    System.out.println("[ 📟 - GitLogAgent ] Métricas inseridas no Mongo (run=" + runId + ")");
+                    System.out.println("[ GitLogAgent ] - Métricas inseridas no Mongo (run=" + runId + ")");
 
                     ACLMessage notify = new ACLMessage(ACLMessage.INFORM);
                     notify.addReceiver(new AID("coordinator_agent", AID.ISLOCALNAME));
@@ -92,7 +82,7 @@ public class GitLogAgent extends Agent {
                     send(notify);
 
                 } catch (Exception e) {
-                    System.out.println("[ 📟 - GitLogAgent ] Exceção no processamento: " + e.getMessage());
+                    System.out.println("[ GitLogAgent ] - Exceção no processamento: " + e.getMessage());
                     e.printStackTrace();
 
                     try {
