@@ -64,6 +64,11 @@ docker compose --env-file .env up -d
 - Gere um token novo e cole em `SONAR_TOKEN`, assim como o nome do projeto em `SONAR_PROJECT`
 - Reinicie o container para que ele suba as alterações.
 
+```bash
+docker compose stop sonarqube
+docker compose start sonarqube
+```
+
 ## Fluxo de uso (webhook)
 Após o stack estar ativo, dispare a análise enviando um repositório via webhook:
 
