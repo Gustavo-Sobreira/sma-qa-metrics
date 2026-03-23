@@ -58,6 +58,22 @@ public class CoordinatorAgent extends Agent {
         volatile String lastMsg = "";
         volatile String repoPath = "";
         volatile String repoUrl = "";
+
+        volatile int lastLoggedPct = -1;
+        volatile String lastLoggedStage = "";
+    }
+
+    private void log(String level, String runId, String event, String msg) {
+        String ts = Instant.now().toString();
+        String shortRun = runId != null ? runId.substring(0, 8) : "-";
+
+        System.out.println(String.format(
+                "%s | %-5s | run=%s | event=%s | %s",
+                ts,
+                level,
+                shortRun,
+                event,
+                msg == null ? "" : msg));
     }
 
     @Override
@@ -73,11 +89,28 @@ public class CoordinatorAgent extends Agent {
                 for (Map.Entry<String, RunState> e : runs.entrySet()) {
                     String runId = e.getKey();
                     RunState s = e.getValue();
-                    if (s == null) continue;
-                    if (s.failed) continue;
-                    if (s.pct >= 100) continue;
+                    if (s == null)
+                        continue;
+                    if (s.failed)
+                        continue;
+                    if (s.pct >= 100)
+                        continue;
 
-                    System.out.println(renderProgress(runId, s));
+                    if (s.pct != s.lastLoggedPct || !s.stage.equals(s.lastLoggedStage)) {
+
+                        log("INFO", runId, "RUN_PROGRESS",
+                                String.format("stage=%s progress=%d%% qa=%s git=%s llm=%s msg=\"%s\"",
+                                        s.stage,
+                                        s.pct,
+                                        s.qaOk ? "ok" : "pend",
+                                        s.gitOk ? "ok" : "pend",
+                                        s.llmStarted ? (s.llmOk ? "ok" : "run") : "pend",
+                                        s.lastMsg));
+
+                        s.lastLoggedPct = s.pct;
+                        s.lastLoggedStage = s.stage;
+                    }
+
                     setRun(runId,
                             "stage", s.stage,
                             "progress_pct", s.pct,
@@ -102,7 +135,8 @@ public class CoordinatorAgent extends Agent {
                 String runId = getRunId(payload);
 
                 if (runId == null) {
-                    System.out.println("[ CoordinatorAgent ] - Aviso: msg sem run_id (ontology=" + ontology + ") content=" + preview(content));
+                    System.out.println("[ CoordinatorAgent ] - Aviso: msg sem run_id (ontology=" + ontology
+                            + ") content=" + preview(content));
                     return;
                 }
 
@@ -122,8 +156,9 @@ public class CoordinatorAgent extends Agent {
                             "progress_pct", s.pct,
                             "progress_at", Instant.now().toString());
 
-                    System.out.println("[ RUN " + runId.substring(0, 8) + " ] Finalizado: LLM_DONE");
+                    log("INFO", runId, "LLM_DONE", "Processo de análise concluído");
                     cleanup(runId);
+                    System.exit(0);
                     return;
                 }
 
@@ -140,7 +175,7 @@ public class CoordinatorAgent extends Agent {
                     s.lastMsg = "QA concluído";
 
                     setRun(runId, "qa_ok", true, "qa_completed_at", Instant.now().toString());
-                    System.out.println("[ CoordinatorAgent ] - QA_DONE recebido (run=" + runId + ")");
+                    log("INFO", runId, "QA_DONE", null);
                 }
 
                 if ("GIT_DONE".equals(ontology)) {
@@ -150,7 +185,7 @@ public class CoordinatorAgent extends Agent {
                     s.lastMsg = "Git concluído";
 
                     setRun(runId, "git_ok", true, "git_completed_at", Instant.now().toString());
-                    System.out.println("[ CoordinatorAgent ] - GIT_DONE recebido (run=" + runId + ")");
+                    log("INFO", runId, "GIT_DONE", null);
                 }
 
                 if ("QA_FAILED".equals(ontology) || "GIT_FAILED".equals(ontology)) {
@@ -165,13 +200,12 @@ public class CoordinatorAgent extends Agent {
                     s.pct = Math.max(s.pct, 85);
                     s.lastMsg = "Barreira atingida";
 
-                    System.out.println("[ CoordinatorAgent ] - Barreira atingida: chamando LlmAgent (run=" + runId + ")");
+                    log("INFO", runId, "BARRIER_OK", "Chamando LLM");
                     triggerLlm(runId, s);
                 }
             }
         });
     }
-
 
     private void startHttpServer(int port) {
         try {
@@ -201,7 +235,8 @@ public class CoordinatorAgent extends Agent {
             new File(REPOS_DIR).mkdirs();
 
             String runId = UUID.randomUUID().toString();
-            String repoPath = REPOS_DIR + "/" + PROJECT_DIR_PREFIX + "-" + runId;
+            String repoName = extractRepoName(repoUrl);
+            String repoPath = REPOS_DIR + "/" + PROJECT_DIR_PREFIX + "-" + repoName;
 
             RunState s = runs.computeIfAbsent(runId, k -> new RunState());
             s.repoUrl = repoUrl;
@@ -250,12 +285,19 @@ public class CoordinatorAgent extends Agent {
         }
     }
 
+    private String extractRepoName(String repoUrl) {
+        String name = repoUrl.substring(repoUrl.lastIndexOf("/") + 1);
+        if (name.endsWith(".git")) {
+            name = name.substring(0, name.length() - 4);
+        }
+        return name.replaceAll("[^a-zA-Z0-9-_\\.]", "_");
+    }
+
     private void sendRepoReady(String runId, String repoUrl, String repoPath) {
         Map<String, Object> payload = Map.of(
                 "run_id", runId,
                 "repo_url", repoUrl,
-                "repo_path", repoPath
-        );
+                "repo_path", repoPath);
 
         sendToService("code-analyzer", new AID("code_analyzer_agent", AID.ISLOCALNAME),
                 "REPO_READY", payload);
@@ -268,11 +310,12 @@ public class CoordinatorAgent extends Agent {
         s.pct = 25;
         s.lastMsg = "QA/Git em andamento...";
 
-        System.out.println("[ CoordinatorAgent ] - Iniciando análise do Projeto " + runId + " - " + repoPath);
+        log("INFO", runId, "REPO_READY", "path=" + repoPath);
     }
 
     private void triggerLlm(String runId, RunState s) {
-        if (s.failed) return;
+        if (s.failed)
+            return;
 
         sendToService("llm", new AID("llm_agent", AID.ISLOCALNAME),
                 "RUN_LLM", Map.of("run_id", runId));
@@ -293,7 +336,8 @@ public class CoordinatorAgent extends Agent {
         m.setContent(gson.toJson(payload));
 
         if (found != null && !found.isEmpty()) {
-            for (AID a : found) m.addReceiver(a);
+            for (AID a : found)
+                m.addReceiver(a);
         } else {
             m.addReceiver(fallback);
         }
@@ -315,7 +359,7 @@ public class CoordinatorAgent extends Agent {
                 "progress_pct", s.pct,
                 "progress_at", Instant.now().toString());
 
-        System.out.println("[ ❌ - RUN " + runId.substring(0, 8) + " ] Finalizado: " + type + " reason=" + reason);
+        log("ERROR", runId, type, "reason=\"" + reason + "\"");
         cleanup(runId);
     }
 
@@ -328,9 +372,11 @@ public class CoordinatorAgent extends Agent {
     }
 
     private Map safeJsonMap(String content) {
-        if (content == null) return null;
+        if (content == null)
+            return null;
         String s = content.trim();
-        if (!s.startsWith("{")) return null;
+        if (!s.startsWith("{"))
+            return null;
         try {
             return gson.fromJson(s, Map.class);
         } catch (Exception e) {
@@ -339,37 +385,26 @@ public class CoordinatorAgent extends Agent {
     }
 
     private String getRunId(Map payload) {
-        if (payload == null) return null;
+        if (payload == null)
+            return null;
         Object v = payload.get("run_id");
-        if (v == null) return null;
+        if (v == null)
+            return null;
         String s = String.valueOf(v);
         return ("null".equals(s) || s.isBlank()) ? null : s;
     }
 
     private String getReason(Map payload, String rawContent) {
-        if (payload != null && payload.get("reason") != null) return String.valueOf(payload.get("reason"));
+        if (payload != null && payload.get("reason") != null)
+            return String.valueOf(payload.get("reason"));
         return preview(rawContent);
     }
 
     private String preview(String s) {
-        if (s == null) return "";
+        if (s == null)
+            return "";
         s = s.replace("\n", "\\n");
         return s.length() > 220 ? s.substring(0, 220) + "..." : s;
-    }
-
-    private String renderProgress(String runId, RunState s) {
-        int width = 24;
-        int filled = (s.pct * width) / 100;
-        String bar = "[" + "#".repeat(Math.max(0, filled)) + "-".repeat(Math.max(0, width - filled)) + "]";
-        String llm = !s.llmStarted ? "pend" : (s.llmOk ? "ok" : "start");
-
-        return String.format("[ ⏳ - RUN %s ] %s %3d%% | stage=%s | QA=%s | GIT=%s | LLM=%s | %s",
-                runId.substring(0, 8),
-                bar, s.pct, s.stage,
-                s.qaOk ? "ok" : "pend",
-                s.gitOk ? "ok" : "pend",
-                llm,
-                s.lastMsg == null ? "" : s.lastMsg);
     }
 
     private void createRunStatus(String runId, String repoUrl, String repoPath) {
@@ -419,7 +454,8 @@ public class CoordinatorAgent extends Agent {
             Process process = pb.start();
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                 String line;
-                while ((line = reader.readLine()) != null) output.append(line).append("\n");
+                while ((line = reader.readLine()) != null)
+                    output.append(line).append("\n");
             }
             process.waitFor();
         } catch (Exception e) {
@@ -429,12 +465,15 @@ public class CoordinatorAgent extends Agent {
     }
 
     private void deleteDirectory(File dir) {
-        if (!dir.exists()) return;
+        if (!dir.exists())
+            return;
         File[] files = dir.listFiles();
         if (files != null) {
             for (File f : files) {
-                if (f.isDirectory()) deleteDirectory(f);
-                else f.delete();
+                if (f.isDirectory())
+                    deleteDirectory(f);
+                else
+                    f.delete();
             }
         }
         dir.delete();

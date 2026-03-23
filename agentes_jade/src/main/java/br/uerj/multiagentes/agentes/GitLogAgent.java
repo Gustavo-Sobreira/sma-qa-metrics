@@ -92,15 +92,15 @@ public class GitLogAgent extends Agent {
                                         new Document("git_ok", false)
                                                 .append("git_failed_at", Instant.now().toString())
                                                 .append("git_failed_reason", e.getMessage())));
-                    } catch (Exception ignored) {}
+                    } catch (Exception ignored) {
+                    }
 
                     ACLMessage fail = new ACLMessage(ACLMessage.INFORM);
                     fail.addReceiver(new AID("coordinator_agent", AID.ISLOCALNAME));
                     fail.setOntology("GIT_FAILED");
                     fail.setContent(gson.toJson(Map.of(
                             "run_id", runId,
-                            "reason", e.getMessage()
-                    )));
+                            "reason", e.getMessage())));
                     send(fail);
                 }
             }
@@ -114,21 +114,29 @@ public class GitLogAgent extends Agent {
         try {
             Process process = new ProcessBuilder(
                     "bash", "-lc",
-                    "git -C " + escapeBash(repoDir) + " log --numstat --pretty=format:'--commit--%H'"
-            ).start();
+                    "git -C " + escapeBash(repoDir) + " log -n 100 --numstat --pretty=format:'--commit--%H|%ct'").start();
 
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                 String line;
                 String currentCommit = null;
                 int locSum = 0;
                 int nalocSum = 0;
+                long currentTimestamp = 0;
 
                 while ((line = reader.readLine()) != null) {
                     if (line.startsWith("--commit--")) {
                         if (currentCommit != null) {
-                            commits.add(Map.of("commit", currentCommit, "LOC", locSum, "NALOC", nalocSum));
+                            commits.add(Map.of(
+                                    "commit", currentCommit,
+                                    "LOC", locSum,
+                                    "NALOC", nalocSum,
+                                    "timestamp", currentTimestamp));
                         }
-                        currentCommit = line.replace("--commit--", "").trim();
+
+                        String[] parts = line.replace("--commit--", "").split("\\|");
+                        currentCommit = parts[0];
+                        currentTimestamp = parts.length > 1 ? Long.parseLong(parts[1]) : 0;
+
                         locSum = 0;
                         nalocSum = 0;
                         continue;
@@ -141,7 +149,8 @@ public class GitLogAgent extends Agent {
                             int removed = Integer.parseInt(parts[1]);
                             locSum += (added + removed);
                             nalocSum += added;
-                        } catch (NumberFormatException ignored) {}
+                        } catch (NumberFormatException ignored) {
+                        }
                     }
                 }
 
