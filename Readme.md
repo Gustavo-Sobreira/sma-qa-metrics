@@ -60,7 +60,9 @@ docker compose --env-file .env up -d
 - Jade (API): `http://localhost:8080`
 - Sonar Worker: `http://localhost:9100`
 
-As portas padrão podem ser ajustadas via `.env` e já estão expostas no `docker-compose.yml`.【F:docker-compose.yml†L24-L116】
+3) Configure o projeto sonar:
+- Gere um token novo e cole em `SONAR_TOKEN`, assim como o nome do projeto em `SONAR_PROJECT`
+- Reinicie o container para que ele suba as alterações.
 
 ## Fluxo de uso (webhook)
 Após o stack estar ativo, dispare a análise enviando um repositório via webhook:
@@ -79,22 +81,8 @@ curl -X POST http://localhost:8090/webhook \
   -d '{"repository":"https://github.com/WordPress/WordPress.git"}'
 ```
 
-Esses exemplos ilustram o formato de payload esperado pelo endpoint de webhook.【F:Readme.md†L66-L81】
-
-## Configuração de análise do Sonar (avançado)
-O worker cria o arquivo `sonar-project.properties` no repositório analisado. Caso deseje sobrescrever comportamentos, utilize as variáveis abaixo:
-
-- `URL_SONAR`: URL base do SonarQube (padrão `http://sonarqube:9000`).
-- `SONAR_TOKEN`: token de autenticação (obrigatório).
-- `SONAR_PROJECT`: chave do projeto no SonarQube.
-
-Essas variáveis são lidas pelo worker antes de executar o `sonar-scanner`.【F:workers/sonar-worker/worker.py†L31-L50】
-
-## Organização do repositório
-
-- `docker-compose.yml`: define toda a infraestrutura local (serviços, dependências e redes).【F:docker-compose.yml†L1-L160】
-- `workers/sonar-worker/`: container responsável por executar análises e gerar o `sonar-project.properties` dinamicamente.【F:workers/sonar-worker/worker.py†L1-L133】
-- `agentes_jade/`: serviço principal de orquestração (Jade).
+## Resultado
+Para verificar os resultados finais utilize alguma ferramenta conectada ao mongo e abra localize-se pelo runId
 
 ## Observações finais
 Esta base permite o uso experimental em disciplinas de qualidade de software, engenharia de requisitos e governança de código. Recomenda-se registrar os resultados no SonarQube e correlacioná-los com métricas de evolução do repositório (como churn, número de commits e severidade de issues) para análises acadêmicas quantitativas.
