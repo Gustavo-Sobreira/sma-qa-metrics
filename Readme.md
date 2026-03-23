@@ -44,30 +44,37 @@ Essas regras são construídas dinamicamente no worker (`worker.py`).【F:worker
 
 ## Como iniciar a ferramenta
 
-1) Suba a infraestrutura:
+1) Configure o SonarQube:
 
 ```bash
 docker compose down
+
 # opcional: limpar recursos antigos
 # docker system prune -f
 
-docker compose --env-file .env up -d
+docker compose up -d sonarqube
 ```
 
-2) Verifique saúde dos serviços:
+- Acesse SonarQube: `http://localhost:9000`
+- Configure um token.
+- Adicione em `SONAR_TOKEN`.
+- Adicione o nome do projeto em `SONAR_PROJECT`
 
-- SonarQube: `http://localhost:9000`
-- Jade (API): `http://localhost:8080`
-- Sonar Worker: `http://localhost:9100`
 
-3) Configure o projeto sonar:
-- Gere um token novo e cole em `SONAR_TOKEN`, assim como o nome do projeto em `SONAR_PROJECT`
-- Reinicie o container para que ele suba as alterações.
-
+2) Configuração do Gemini:
+- Acesse: `https://aistudio.google.com/api-keys`
+- Gere uma nova chave
+- Adicione em `GEMINI_API_KEY`
+- Execute:
 ```bash
-docker compose stop sonarqube
-docker compose start sonarqube
+docker compose down
+
+# opcional: limpar recursos antigos
+# docker system prune -f
+
+docker compose up -d
 ```
+
 
 ## Fluxo de uso (webhook)
 Após o stack estar ativo, dispare a análise enviando um repositório via webhook:
