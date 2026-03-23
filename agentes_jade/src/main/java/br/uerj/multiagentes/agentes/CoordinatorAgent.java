@@ -250,8 +250,10 @@ public class CoordinatorAgent extends Agent {
             String log;
             File repoDir = new File(repoPath);
             if (repoDir.exists() && new File(repoPath + "/.git").exists()) {
+                log("INFO", runId, "REPO_START", "Repositório será atualizado");
                 log = runGitPull(repoPath);
             } else {
+                log("INFO", runId, "REPO_START", "Repositório será baixado");
                 deleteDirectory(repoDir);
                 repoDir.mkdirs();
                 log = runGitClone(repoUrl, repoPath);
