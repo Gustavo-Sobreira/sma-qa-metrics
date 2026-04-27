@@ -44,7 +44,7 @@ Essas regras são construídas dinamicamente no worker (`worker.py`).【F:worker
 
 ## Como iniciar a ferramenta
 
-1) Configure o SonarQube:
+#### 1) Configure o SonarQube:
 
 ```bash
 docker compose down
@@ -61,7 +61,7 @@ docker compose up -d sonarqube
 - Adicione o nome do projeto em `SONAR_PROJECT`
 
 
-2) Configuração do Gemini:
+#### 2) Configuração do Gemini:
 - Acesse: `https://aistudio.google.com/api-keys`
 - Gere uma nova chave
 - Adicione em `GEMINI_API_KEY`
@@ -82,7 +82,7 @@ Após o stack estar ativo, dispare a análise enviando um repositório via webho
 ```bash
 curl -X POST http://localhost:8090/webhook \
   -H "Content-Type: application/json" \
-  -d '{"repository":"https://github.com/JamilBine/Projetos-PHP.git"}'
+  -d '{"repository":"https://github.com/WordPress/WordPress.git"}'
 ```
 
 ou
@@ -90,7 +90,22 @@ ou
 ```bash
 curl -X POST http://localhost:8090/webhook \
   -H "Content-Type: application/json" \
-  -d '{"repository":"https://github.com/WordPress/WordPress.git"}'
+  -d '{"repository":"https://github.com/laravel/laravel.git"}'
+```
+
+ou
+
+```bash
+curl -X POST http://localhost:8090/webhook \
+  -H "Content-Type: application/json" \
+  -d '{"repository":"https://github.com/symfony/symfony.git"}'
+```
+
+Para teste, recomendamos que use o seguinte repositório:
+```bash
+curl -X POST http://localhost:8090/webhook \
+  -H "Content-Type: application/json" \
+  -d '{"repository":"https://github.com/JamilBine/Projetos-PHP.git"}'
 ```
 
 ## Resultado

@@ -248,42 +248,68 @@ public class LlmAgent extends Agent {
                 .append("git", git);
     }
 
-    private String buildPrompt(String runId, Document input) {
-        return ""
-                + "You are a STRICT analytical agent.\n"
-                + "You MUST ONLY use the provided JSON data.\n"
-                + "You MAY derive insights, comparisons, and qualitative analysis\n"
-                + "FROM the provided data, but you MUST NOT introduce new numerical values.\n\n"
+  private String buildPrompt(String runId, Document input) {
+    return """
+        ROLE:
+        You are a STRICT analytical agent.
 
-                + "CRITICAL RULES:\n"
-                + "- If a metric is missing → explicitly write: NOT AVAILABLE\n"
-                + "- If Sonar measures array is empty → ALL code metrics MUST be NOT AVAILABLE\n"
-                + "- If you output any number not present in JSON → response is INVALID\n"
-                + "- DO NOT use prior knowledge\n"
-                
+        CONSTRAINTS:
+        - Use ONLY the provided JSON data
+        - Do NOT introduce new numerical values
+        - Do NOT use prior knowledge
 
-                + "FAIL CONDITION:\n"
-                + "If you cannot comply, output EXACTLY:\n"
-                + "ERROR: INSUFFICIENT DATA\n\n"
+        NUMERICAL CONSISTENCY RULE:
+        - Every number in your response MUST exist in the JSON
+        - If not present → DO NOT use it
 
-                + "DATA (JSON):\n"
-                + input.toJson() + "\n\n"
+        MISSING DATA RULES:
+        - Missing metric → "NOT AVAILABLE"
+        - Empty Sonar measures → ALL code metrics = "NOT AVAILABLE"
+        - Do NOT estimate or infer missing values
 
-                + "OUTPUT FORMAT (STRICT):\n"
+        PROHIBITED ACTIONS:
+        - Invent numbers
+        - Use external knowledge
+        - Generalize beyond JSON
 
-                + "1) Executive Summary\n"
-                + "- Exactly 3 bullet points\n\n"
+        SELF-VALIDATION:
+        Before answering, verify:
+        1. No new numbers were introduced
+        2. All missing values are "NOT AVAILABLE"
+        3. Output format is strictly followed
 
-                + "2) Key Findings\n\n"
+        FAIL CONDITIONS:
+        If any rule is violated, output EXACTLY:
+        ERROR: INSUFFICIENT DATA
 
-                + "3) Project Metrics\n\n"
+        DATA (JSON):
+        <<<START_JSON>>>
+        """ 
+        + input.toJson() + 
+        """
+        <<<END_JSON>>>
 
-                + "4) Code Metrics\n\n"
+        OUTPUT FORMAT (STRICT):
 
-                + "5) Risks and Hypotheses\n\n"
+        1) Executive Summary
+        - Exactly 3 bullet points
 
-                + "6) Prioritized Practical Recommendations\n";
-    }
+        2) Key Findings
+        - Bullet list only
+
+        3) Project Metrics
+        - Metric: Value
+
+        4) Code Metrics
+        - Metric: Value
+
+        5) Risks and Hypotheses
+        - Risk + evidence from JSON
+
+        6) Prioritized Practical Recommendations
+        - [Priority: High | Medium | Low] Recommendation
+        """;
+}
 
     private void saveReport(String runId, String report) {
         MongoDatabase db = MongoHelper.getDatabase();
