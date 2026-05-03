@@ -7,40 +7,60 @@ import br.uerj.multiagentes.utils.MongoHelper;
 import com.google.gson.Gson;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.UpdateOptions;
 
 import jade.core.AID;
 import jade.core.Agent;
+import jade.core.behaviours.CyclicBehaviour;
 import jade.lang.acl.ACLMessage;
 
 import org.bson.Document;
 
-import java.nio.charset.StandardCharsets;
-import java.time.Instant;
-import java.util.*;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.net.URI;
-
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class CodeAnalyzerAgent extends Agent {
 
-    private final Gson gson = GsonProvider.get();
-    private final Map<String, Set<String>> doneAgents = new HashMap<>();
-    private final Map<String, Boolean> failedRuns = new HashMap<>();
+    private static final Gson gson = GsonProvider.get();
+    private static final Set<String> REQUIRED_AGENTS = Set.of("sonar");
+    private static final String SONAR_METRICS = String.join(",",
+            "bugs",
+            "reliability_rating",
+            "vulnerabilities",
+            "security_hotspots",
+            "security_rating",
+            "code_smells",
+            "sqale_index",
+            "sqale_debt_ratio",
+            "coverage",
+            "duplicated_lines_density",
+            "duplicated_blocks",
+            "ncloc",
+            "complexity");
 
-    private final HttpClient http = HttpClient.newHttpClient();
+    private final Map<String, Set<String>> doneAgents = new ConcurrentHashMap<>();
+    private final Map<String, String> sonarProjectKeys = new ConcurrentHashMap<>();
+    private final Map<String, String> sonarProjectNames = new ConcurrentHashMap<>();
+    private final Set<String> failedRuns = ConcurrentHashMap.newKeySet();
+    private final HttpClient http = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(20))
+            .build();
 
     @Override
     protected void setup() {
-        AgentDirectory.register(this, "code-analyzer", "code-analyzer");
+        AgentDirectory.register(this, "code_analyzer", "code_analyzer");
 
-        System.out.println("[ CodeAnalyzerAgent ] - Pronto.");
-
-        addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
-            @Override
+        addBehaviour(new CyclicBehaviour() {
             public void action() {
-
                 ACLMessage msg = myAgent.receive();
                 if (msg == null) {
                     block();
@@ -49,99 +69,39 @@ public class CodeAnalyzerAgent extends Agent {
 
                 try {
                     String ontology = msg.getOntology();
+                    Map payload = gson.fromJson(msg.getContent(), Map.class);
+                    String run_id = String.valueOf(payload.get("run_id"));
 
-                    if (msg.getPerformative() == ACLMessage.INFORM && "REPO_READY".equals(ontology)) {
-                        Map payload = gson.fromJson(msg.getContent(), Map.class);
-                        String runId = String.valueOf(payload.get("run_id"));
-                        String repoPath = String.valueOf(payload.get("repo_path"));
+                    if (run_id == null || run_id.isBlank() || "null".equals(run_id)) {
+                        return;
+                    }
 
-                        doneAgents.put(runId, new HashSet<>());
-                        failedRuns.put(runId, Boolean.FALSE);
+                    log(run_id, "RECEIVED", ontology, payload);
 
-                        updateRun(runId, "qa_stage", "SONAR_RUNNING", "qa_started_at", Instant.now().toString());
+                    if (isRunFailed(run_id)) {
+                        log(run_id, "IGNORED_AFTER_FAILED", ontology, payload);
+                        return;
+                    }
 
-                        ACLMessage sonarReq = new ACLMessage(ACLMessage.REQUEST);
-                        sonarReq.setOntology("RUN_SONAR");
-                        sonarReq.setContent(gson.toJson(Map.of(
-                                "run_id", runId,
-                                "repo_path", repoPath
-                        )));
-
-                        List<AID> sonarAgents = AgentDirectory.find(myAgent, "sonar");
-                        if (sonarAgents != null && !sonarAgents.isEmpty()) {
-                            sonarAgents.forEach(sonarReq::addReceiver);
-                        } else {
-                            sonarReq.addReceiver(new AID("sonar_agent", AID.ISLOCALNAME));
-                        }
-                        send(sonarReq);
-
+                    if (msg.getPerformative() == ACLMessage.INFORM && "START_CODE_ANALYSIS".equals(ontology)) {
+                        startCodeAnalysis(payload, run_id);
                         return;
                     }
 
                     if (msg.getPerformative() == ACLMessage.INFORM && "QA_SUBTASK_FAILED".equals(ontology)) {
-                        Map payload = gson.fromJson(msg.getContent(), Map.class);
-                        String runId = String.valueOf(payload.get("run_id"));
-                        failedRuns.put(runId, Boolean.TRUE);
-
-                        String reason = String.valueOf(payload.getOrDefault("reason", "subtask failed"));
-                        updateRun(runId, "qa_stage", "FAILED", "qa_failed_at", Instant.now().toString());
-                        sendQaFailed(runId, "Static analysis failed: " + reason);
-                        doneAgents.remove(runId);
+                        String reason = String.valueOf(payload.getOrDefault("reason", "subtask_failed"));
+                        failedRuns.add(run_id);
+                        updateCodeReport(run_id,
+                                "code_stage", "FAILED",
+                                "code_failed_at", Instant.now().toString(),
+                                "reason", reason);
+                        sendFailed(run_id, "Static analysis failed: " + reason);
+                        doneAgents.remove(run_id);
                         return;
                     }
 
                     if (msg.getPerformative() == ACLMessage.INFORM && "QA_SUBTASK_DONE".equals(ontology)) {
-
-                        Map payload = gson.fromJson(msg.getContent(), Map.class);
-                        String runId = String.valueOf(payload.get("run_id"));
-                        String agent = String.valueOf(payload.get("agent"));
-                        boolean ok = Boolean.TRUE.equals(payload.get("ok")) || "true".equals(String.valueOf(payload.get("ok")));
-
-                        if (!ok) {
-                            failedRuns.put(runId, Boolean.TRUE);
-                            String reason = String.valueOf(payload.getOrDefault("reason", payload.getOrDefault("error", "unknown")));
-                            updateRun(runId, "qa_stage", "FAILED", "qa_failed_at", Instant.now().toString());
-                            sendQaFailed(runId, "Static analysis agent returned ok=false: " + agent + " reason=" + reason);
-                            doneAgents.remove(runId);
-                            return;
-                        }
-
-                        Set<String> done = doneAgents.computeIfAbsent(runId, k -> new HashSet<>());
-                        done.add(agent);
-
-                        // TODO Ao adicionar mais agentes aumente o nº 1
-                        if (done.size() >= 1 && !failedRuns.getOrDefault(runId, false)) {
-                            updateRun(runId, "qa_stage", "PERSISTING", "qa_persist_started_at", Instant.now().toString());
-
-                            boolean persisted = persistSonarMetrics(runId);
-
-                            MongoDatabase db = MongoHelper.getDatabase();
-                            MongoCollection<Document> runs = db.getCollection("run_status");
-                            runs.updateOne(new Document("run_id", runId),
-                                    new Document("$set", new Document("qa_metrics_done", persisted)
-                                            .append("qa_metrics_finished_at", Instant.now().toString())
-                                            .append("qa_ok", persisted)));
-
-                            if (persisted) {
-                                ACLMessage notify = new ACLMessage(ACLMessage.INFORM);
-                                notify.addReceiver(new AID("coordinator_agent", AID.ISLOCALNAME));
-                                notify.setOntology("QA_DONE");
-                                notify.setContent(gson.toJson(Map.of(
-                                        "run_id", runId,
-                                        "ok", true
-                                )));
-                                send(notify);
-                                updateRun(runId, "qa_stage", "DONE", "qa_completed_at", Instant.now().toString());
-                            } else {
-                                updateRun(runId, "qa_stage", "FAILED", "qa_failed_at", Instant.now().toString());
-                                sendQaFailed(runId, "Persistência de métricas Sonar falhou");
-                            }
-
-                            doneAgents.remove(runId);
-                            failedRuns.remove(runId);
-                        }
-
-                        return;
+                        handleSubtaskDone(payload, run_id);
                     }
 
                 } catch (Exception e) {
@@ -151,127 +111,215 @@ public class CodeAnalyzerAgent extends Agent {
         });
     }
 
-    private void sendQaFailed(String runId, String reason) {
-        ACLMessage notify = new ACLMessage(ACLMessage.INFORM);
-        notify.addReceiver(new AID("coordinator_agent", AID.ISLOCALNAME));
-        notify.setOntology("QA_FAILED");
-        notify.setContent(gson.toJson(Map.of(
-                "run_id", runId,
-                "reason", reason
-        )));
-        send(notify);
+    private void startCodeAnalysis(Map payload, String run_id) {
+        String repo_path = String.valueOf(payload.get("repo_path"));
+        String projectKey = stringValue(payload.get("sonar_project_key"),
+                System.getenv().getOrDefault("SONAR_PROJECT", "sma-project"));
+        String projectName = stringValue(payload.get("sonar_project_name"), projectKey);
 
-        System.out.println("[ CodeAnalyzerAgent ] - QA_FAILED enviado (run=" + runId + ") reason=" + reason);
+        doneAgents.put(run_id, ConcurrentHashMap.newKeySet());
+        sonarProjectKeys.put(run_id, projectKey);
+        sonarProjectNames.put(run_id, projectName);
+        failedRuns.remove(run_id);
+
+        updateCodeReport(run_id,
+                "code_stage", "SONAR_RUNNING",
+                "code_started_at", Instant.now().toString());
+
+        ACLMessage sonarReq = new ACLMessage(ACLMessage.REQUEST);
+        sonarReq.setOntology("RUN_SONAR");
+        sonarReq.setContent(gson.toJson(Map.of(
+                "run_id", run_id,
+                "repo_path", repo_path,
+                "sonar_project_key", projectKey,
+                "sonar_project_name", projectName)));
+
+        List<AID> sonarAgents = AgentDirectory.find(this, "sonar");
+        if (sonarAgents != null && !sonarAgents.isEmpty()) {
+            sonarAgents.forEach(sonarReq::addReceiver);
+        } else {
+            sonarReq.addReceiver(new AID("sonar_agent", AID.ISLOCALNAME));
+        }
+
+        send(sonarReq);
+        log(run_id, "SENT", "RUN_SONAR", Map.of(
+                "repo_path", repo_path,
+                "sonar_project_key", projectKey,
+                "sonar_project_name", projectName));
     }
 
-    private void updateRun(String runId, String k1, Object v1, String k2, Object v2) {
-        try {
-            MongoDatabase db = MongoHelper.getDatabase();
-            MongoCollection<Document> runs = db.getCollection("run_status");
-            runs.updateOne(new Document("run_id", runId),
-                    new Document("$set", new Document(k1, v1).append(k2, v2)));
-        } catch (Exception ignored) {}
+    private void handleSubtaskDone(Map payload, String run_id) {
+        String agent = String.valueOf(payload.get("agent"));
+        boolean ok = Boolean.TRUE.equals(payload.get("ok")) ||
+                "true".equalsIgnoreCase(String.valueOf(payload.get("ok")));
+
+        if (!ok) {
+            failedRuns.add(run_id);
+            sendFailed(run_id, "Agent failed: " + agent);
+            return;
+        }
+
+        Set<String> done = doneAgents.computeIfAbsent(run_id, k -> ConcurrentHashMap.newKeySet());
+        done.add(agent);
+
+        if (!done.containsAll(REQUIRED_AGENTS) || failedRuns.contains(run_id)) {
+            return;
+        }
+
+        boolean persisted = persistSonarMetrics(run_id);
+        if (persisted) {
+            updateCodeReport(run_id,
+                    "code_stage", "DONE",
+                    "code_finished_at", Instant.now().toString());
+            notifyCoordinator(run_id, "CODE_ANALYZER_DONE", null);
+        } else {
+            sendFailed(run_id, "Could not persist SonarQube metrics");
+        }
+
+        doneAgents.remove(run_id);
+        sonarProjectKeys.remove(run_id);
+        sonarProjectNames.remove(run_id);
+        failedRuns.remove(run_id);
     }
 
-    private boolean persistSonarMetrics(String runId) {
-        String projectKey = System.getenv().getOrDefault("SONAR_PROJECT", "sma-project");
+    private boolean persistSonarMetrics(String run_id) {
+        String projectKey = sonarProjectKeys.getOrDefault(run_id,
+                System.getenv().getOrDefault("SONAR_PROJECT", "sma-project"));
+        String projectName = sonarProjectNames.getOrDefault(run_id, projectKey);
         String baseUrl = System.getenv().getOrDefault("URL_SONAR", "http://sonarqube:9000");
 
         try {
-            String metricsList = getAllMetrics(baseUrl);
-            String sonarJson = "{}";
+            String sonarJson = fetchMetrics(baseUrl, projectKey, SONAR_METRICS);
 
-            if (metricsList == null || metricsList.isBlank()) {
-                System.out.println("[ CodeAnalyzerAgent ] - Nenhuma métrica encontrada no Sonar.");
-            } else {
-                sonarJson = fetchAllMetrics(baseUrl, projectKey, metricsList);
+            Document metrics;
+            try {
+                metrics = Document.parse(sonarJson);
+            } catch (Exception e) {
+                metrics = new Document("raw", sonarJson);
             }
 
-            MongoDatabase db = MongoHelper.getDatabase();
-            MongoCollection<Document> coll = db.getCollection("sonar_metrics");
-
-            Document doc = new Document()
-                    .append("run_id", runId)
+            Document set = new Document()
+                    .append("run_id", run_id)
                     .append("project_key", projectKey)
+                    .append("project_name", projectName)
+                    .append("metric_keys", SONAR_METRICS)
+                    .append("metrics", metrics)
                     .append("stored_at", Instant.now().toString());
 
-            try {
-                doc.append("metrics", Document.parse(sonarJson));
-            } catch (Exception e) {
-                doc.append("metrics_raw", sonarJson);
-            }
+            MongoDatabase db = MongoHelper.getDatabase();
+            upsert(db.getCollection("code_metrics"), run_id, set);
+            upsert(db.getCollection("sonar_metrics"), run_id, set);
 
-            coll.insertOne(doc);
-
-            System.out.println("[ CodeAnalyzerAgent ] - Métricas Sonar persistidas (run=" + runId + ")");
+            log(run_id, "METRICS_PERSISTED", "SONAR_MEASURES", set);
             return true;
 
         } catch (Exception ex) {
-            System.out.println("[ CodeAnalyzerAgent ] - Erro ao persistir métricas do Sonar: " + ex.getMessage());
-            ex.printStackTrace();
+            log(run_id, "METRICS_FAILED", "SONAR_MEASURES",
+                    Map.of("reason", ex.getMessage() == null ? "unknown" : ex.getMessage()));
             return false;
         }
     }
 
-    private String getAllMetrics(String baseUrl) throws Exception {
-        String url = baseUrl + "/api/metrics/search?ps=500";
-
-        HttpRequest.Builder builder = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .GET();
-
-        String token = System.getenv().getOrDefault("SONAR_TOKEN", "");
-        if (!token.isBlank()) {
-            String auth = token + ":";
-            String basic = java.util.Base64.getEncoder()
-                    .encodeToString(auth.getBytes(StandardCharsets.UTF_8));
-            builder.header("Authorization", "Basic " + basic);
-        }
-
-        HttpResponse<String> resp = http.send(builder.build(), HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() != 200) {
-            throw new RuntimeException("Sonar metrics API returned status " + resp.statusCode() + " body=" + resp.body());
-        }
-
-        Map map = gson.fromJson(resp.body(), Map.class);
-        List<Map> metrics = (List<Map>) map.get("metrics");
-        if (metrics == null || metrics.isEmpty()) return "";
-
-        StringBuilder sb = new StringBuilder();
-        for (Map m : metrics) {
-            Object key = m.get("key");
-            if (key != null) sb.append(key).append(",");
-        }
-
-        if (sb.length() == 0) return "";
-        sb.setLength(sb.length() - 1);
-        return sb.toString();
-    }
-
-    private String fetchAllMetrics(String baseUrl, String projectKey, String metricsCsv) throws Exception {
+    private String fetchMetrics(String baseUrl, String projectKey, String metricsCsv) throws Exception {
         String url = baseUrl + "/api/measures/component?component=" + urlEncode(projectKey)
                 + "&metricKeys=" + urlEncode(metricsCsv);
 
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(60))
                 .GET();
 
         String token = System.getenv().getOrDefault("SONAR_TOKEN", "");
         if (!token.isBlank()) {
-            String auth = token + ":";
             String basic = java.util.Base64.getEncoder()
-                    .encodeToString(auth.getBytes(StandardCharsets.UTF_8));
+                    .encodeToString((token + ":").getBytes(StandardCharsets.UTF_8));
             builder.header("Authorization", "Basic " + basic);
         }
 
         HttpResponse<String> resp = http.send(builder.build(), HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() != 200) {
-            throw new RuntimeException("Sonar measures API returned status " + resp.statusCode() + " body=" + resp.body());
+        String body = resp.body() == null ? "" : resp.body();
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+            throw new RuntimeException("Sonar measures API returned status " + resp.statusCode()
+                    + " preview=" + preview(body));
         }
-        return resp.body();
+        return body;
+    }
+
+    private void notifyCoordinator(String run_id, String ontology, String reason) {
+        ACLMessage notify = new ACLMessage(ACLMessage.INFORM);
+        notify.addReceiver(new AID("coordinator_agent", AID.ISLOCALNAME));
+        notify.setOntology(ontology);
+        notify.setContent(reason == null
+                ? gson.toJson(Map.of("run_id", run_id))
+                : gson.toJson(Map.of("run_id", run_id, "reason", reason)));
+        send(notify);
+        log(run_id, "SENT", ontology, reason == null ? Map.of() : Map.of("reason", reason));
+    }
+
+    private void sendFailed(String run_id, String reason) {
+        updateCodeReport(run_id,
+                "code_stage", "FAILED",
+                "code_failed_at", Instant.now().toString(),
+                "reason", reason);
+        notifyCoordinator(run_id, "CODE_ANALYZER_FAILED", reason);
+    }
+
+    private void updateCodeReport(String run_id, Object... kv) {
+        try {
+            Document set = new Document("run_id", run_id);
+            for (int i = 0; i < kv.length; i += 2) {
+                set.append(String.valueOf(kv[i]), kv[i + 1]);
+            }
+
+            MongoHelper.getDatabase()
+                    .getCollection("codeReport")
+                    .updateOne(new Document("run_id", run_id),
+                            new Document("$set", set),
+                            new UpdateOptions().upsert(true));
+        } catch (Exception ignored) {}
+    }
+
+    private void upsert(MongoCollection<Document> col, String run_id, Document set) {
+        col.updateOne(new Document("run_id", run_id),
+                new Document("$set", set),
+                new UpdateOptions().upsert(true));
+    }
+
+    private boolean isRunFailed(String run_id) {
+        Document status = MongoHelper.getDatabase()
+                .getCollection("runStatus")
+                .find(new Document("run_id", run_id))
+                .first();
+
+        return status != null &&
+                (Boolean.TRUE.equals(status.getBoolean("failed")) || "FAILED".equals(status.getString("stage")));
+    }
+
+    private void log(String run_id, String event, String ontology, Object data) {
+        try {
+            MongoHelper.getDatabase().getCollection("logs").insertOne(new Document()
+                    .append("run_id", run_id)
+                    .append("agent", "code_analyzer")
+                    .append("event", event)
+                    .append("ontology", ontology)
+                    .append("data", data == null ? new Document() : Document.parse(gson.toJson(data)))
+                    .append("created_at", Instant.now().toString()));
+        } catch (Exception ignored) {}
     }
 
     private String urlEncode(String s) {
         return java.net.URLEncoder.encode(s, StandardCharsets.UTF_8);
+    }
+
+    private String preview(String body) {
+        if (body == null) return "";
+        return body.length() > 500 ? body.substring(0, 500) + "..." : body;
+    }
+
+    private String stringValue(Object value, String fallback) {
+        if (value == null) return fallback;
+        String s = String.valueOf(value);
+        if (s.isBlank() || "null".equalsIgnoreCase(s)) return fallback;
+        return s;
     }
 }

@@ -18,8 +18,16 @@ public class MainContainer {
                     "br.uerj.multiagentes.agentes.CoordinatorAgent",
                     null).start();
 
+            container.createNewAgent("git_agent",
+                    "br.uerj.multiagentes.agentes.GitAgent",
+                    null).start();
+
             container.createNewAgent("code_analyzer_agent",
                     "br.uerj.multiagentes.agentes.CodeAnalyzerAgent",
+                    null).start();
+
+            container.createNewAgent("project_analyzer_agent",
+                    "br.uerj.multiagentes.agentes.ProjectAnalyzerAgent",
                     null).start();
 
             container.createNewAgent("sonar_agent",

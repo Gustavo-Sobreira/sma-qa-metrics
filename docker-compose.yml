@@ -13,7 +13,7 @@ services:
 
       URL_SONAR: ${URL_SONAR:-http://sonarqube:9000}
       SONAR_TOKEN: ${SONAR_TOKEN}
-      SONAR_PROJECT: ${SONAR_PROJECT:-sma-project}
+      SONAR_PROJECT: ${SONAR_PROJECT:-}
       PORT_WEBHOOK: ${PORT_WEBHOOK:-8090}
 
       # LLM (Ollama)
@@ -24,7 +24,7 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3-flash-preview}
-      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/chat/completions}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/models/}
 
     ports:
       - "${PORT_JADE:-8080}:8080"
@@ -119,7 +119,7 @@ services:
     environment:
       URL_SONAR: ${URL_SONAR:-http://sonarqube:9000}
       SONAR_TOKEN: ${SONAR_TOKEN}
-      SONAR_PROJECT: ${SONAR_PROJECT:-sma-project}
+      SONAR_PROJECT: ${SONAR_PROJECT:-}
     ports:
       - "${PORT_SONAR_WORKER:-9100}:9100"
     volumes:

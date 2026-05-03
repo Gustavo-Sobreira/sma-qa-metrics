@@ -10,8 +10,8 @@ import com.mongodb.client.MongoDatabase;
 
 import jade.core.AID;
 import jade.core.Agent;
+import jade.core.behaviours.CyclicBehaviour;
 import jade.lang.acl.ACLMessage;
-import jade.lang.acl.MessageTemplate;
 
 import org.bson.Document;
 
@@ -26,116 +26,124 @@ public class GitLogAgent extends Agent {
 
     @Override
     protected void setup() {
+
         AgentDirectory.register(this, "git-log", "git-log");
 
-        System.out.println("[ GitLogAgent ] - Pronto.");
+        addBehaviour(new CyclicBehaviour() {
 
-        addBehaviour(new jade.core.behaviours.CyclicBehaviour() {
-            @Override
             public void action() {
-                MessageTemplate mt = MessageTemplate.MatchPerformative(ACLMessage.INFORM);
-                ACLMessage msg = myAgent.receive(mt);
 
+                ACLMessage msg = receive();
                 if (msg == null) {
                     block();
                     return;
                 }
 
-                if (!"REPO_READY".equals(msg.getOntology())) {
+                if (msg.getPerformative() != ACLMessage.REQUEST ||
+                        !"RUN_PROJECT_ANALYZER".equals(msg.getOntology())) {
                     return;
                 }
 
                 Map payload = gson.fromJson(msg.getContent(), Map.class);
-                String runId = String.valueOf(payload.get("run_id"));
-                String repoPath = String.valueOf(payload.get("repo_path"));
+
+                String run_id = String.valueOf(payload.get("run_id"));
+                String repo_path = String.valueOf(payload.get("repo_path"));
+                log(run_id, "RECEIVED", "RUN_PROJECT_ANALYZER", payload);
+
+                if (isRunFailed(run_id)) {
+                    log(run_id, "IGNORED_AFTER_FAILED", "RUN_PROJECT_ANALYZER", payload);
+                    return;
+                }
 
                 try {
-                    System.out.println("[ GitLogAgent ] - Processando métricas de repositório (run=" + runId + ")");
 
-                    Map<String, Object> locMetrics = calcularLOCporCommit(repoPath);
+                    Map<String, Object> metrics = calcularLOCporCommit(repo_path);
 
-                    boolean inserted = false;
                     MongoDatabase db = MongoHelper.getDatabase();
-                    MongoCollection<Document> col = db.getCollection("git_metrics");
+                    MongoCollection<Document> col = db.getCollection("projectsReport");
 
-                    Document metrics = new Document()
-                            .append("run_id", runId)
-                            .append("repo_path", repoPath)
-                            .append("loc_metrics", locMetrics)
-                            .append("generated_at", Instant.now().toString());
+                    Document doc = new Document()
+                            .append("run_id", run_id)
+                            .append("repo_path", repo_path)
+                            .append("git_log_metrics", metrics)
+                            .append("git_log_at", Instant.now().toString());
 
-                    col.insertOne(metrics);
-                    inserted = true;
+                    col.updateOne(
+                            new Document("run_id", run_id),
+                            new Document("$set", doc),
+                            new com.mongodb.client.model.UpdateOptions().upsert(true)
+                    );
 
-                    db.getCollection("run_status").updateOne(new Document("run_id", runId),
-                            new Document("$set",
-                                    new Document("git_metrics_done", true)
-                                            .append("git_metrics_finished_at", Instant.now().toString())
-                                            .append("git_ok", true)));
+                    ACLMessage done = new ACLMessage(ACLMessage.INFORM);
+                    done.addReceiver(new AID("project_analyzer_agent", AID.ISLOCALNAME));
+                    done.setOntology("QA_SUBTASK_DONE");
+                    done.setContent(gson.toJson(Map.of(
+                            "run_id", run_id,
+                            "agent", "git-log",
+                            "ok", true
+                    )));
 
-                    System.out.println("[ GitLogAgent ] - Métricas inseridas no Mongo (run=" + runId + ")");
-
-                    ACLMessage notify = new ACLMessage(ACLMessage.INFORM);
-                    notify.addReceiver(new AID("coordinator_agent", AID.ISLOCALNAME));
-                    notify.setOntology("GIT_DONE");
-                    notify.setContent(gson.toJson(Map.of("run_id", runId, "ok", inserted)));
-                    send(notify);
+                    send(done);
+                    log(run_id, "SENT", "QA_SUBTASK_DONE", Map.of("agent", "git-log"));
 
                 } catch (Exception e) {
-                    System.out.println("[ GitLogAgent ] - Exceção no processamento: " + e.getMessage());
+
                     e.printStackTrace();
 
-                    try {
-                        MongoDatabase db = MongoHelper.getDatabase();
-                        db.getCollection("run_status").updateOne(new Document("run_id", runId),
-                                new Document("$set",
-                                        new Document("git_ok", false)
-                                                .append("git_failed_at", Instant.now().toString())
-                                                .append("git_failed_reason", e.getMessage())));
-                    } catch (Exception ignored) {
-                    }
-
                     ACLMessage fail = new ACLMessage(ACLMessage.INFORM);
-                    fail.addReceiver(new AID("coordinator_agent", AID.ISLOCALNAME));
-                    fail.setOntology("GIT_FAILED");
+                    fail.addReceiver(new AID("project_analyzer_agent", AID.ISLOCALNAME));
+                    fail.setOntology("QA_SUBTASK_FAILED");
                     fail.setContent(gson.toJson(Map.of(
-                            "run_id", runId,
-                            "reason", e.getMessage())));
+                            "run_id", run_id,
+                            "agent", "git-log",
+                            "reason", e.getMessage()
+                    )));
+
                     send(fail);
+                    log(run_id, "SENT", "QA_SUBTASK_FAILED",
+                            Map.of("agent", "git-log", "reason", e.getMessage() == null ? "unknown" : e.getMessage()));
                 }
             }
         });
     }
 
     private Map<String, Object> calcularLOCporCommit(String repoDir) {
+
         Map<String, Object> result = new HashMap<>();
         List<Map<String, Object>> commits = new ArrayList<>();
 
         try {
             Process process = new ProcessBuilder(
                     "bash", "-lc",
-                    "git -C " + escapeBash(repoDir) + " log -n 100 --numstat --pretty=format:'--commit--%H|%ct'").start();
+                    "git -C " + escapeBash(repoDir) +
+                            " log -n 100 --numstat --pretty=format:'--commit--%H|%ct'")
+                    .start();
 
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()))) {
+
                 String line;
                 String currentCommit = null;
                 int locSum = 0;
                 int nalocSum = 0;
-                long currentTimestamp = 0;
+                long ts = 0;
 
                 while ((line = reader.readLine()) != null) {
+
                     if (line.startsWith("--commit--")) {
+
                         if (currentCommit != null) {
                             commits.add(Map.of(
                                     "commit", currentCommit,
                                     "LOC", locSum,
                                     "NALOC", nalocSum,
-                                    "timestamp", currentTimestamp));
+                                    "timestamp", ts
+                            ));
                         }
 
                         String[] parts = line.replace("--commit--", "").split("\\|");
                         currentCommit = parts[0];
-                        currentTimestamp = parts.length > 1 ? Long.parseLong(parts[1]) : 0;
+                        ts = parts.length > 1 ? Long.parseLong(parts[1]) : 0;
 
                         locSum = 0;
                         nalocSum = 0;
@@ -143,19 +151,26 @@ public class GitLogAgent extends Agent {
                     }
 
                     String[] parts = line.split("\t");
+
                     if (parts.length == 3) {
                         try {
-                            int added = Integer.parseInt(parts[0]);
-                            int removed = Integer.parseInt(parts[1]);
-                            locSum += (added + removed);
-                            nalocSum += added;
-                        } catch (NumberFormatException ignored) {
-                        }
+                            int add = Integer.parseInt(parts[0]);
+                            int rem = Integer.parseInt(parts[1]);
+
+                            locSum += (add + rem);
+                            nalocSum += add;
+
+                        } catch (NumberFormatException ignored) {}
                     }
                 }
 
                 if (currentCommit != null) {
-                    commits.add(Map.of("commit", currentCommit, "LOC", locSum, "NALOC", nalocSum));
+                    commits.add(Map.of(
+                            "commit", currentCommit,
+                            "LOC", locSum,
+                            "NALOC", nalocSum,
+                            "timestamp", ts
+                    ));
                 }
             }
 
@@ -170,5 +185,31 @@ public class GitLogAgent extends Agent {
 
     private String escapeBash(String s) {
         return "'" + s.replace("'", "'\\''") + "'";
+    }
+
+    private boolean isRunFailed(String run_id) {
+        try {
+            Document status = MongoHelper.getDatabase()
+                    .getCollection("runStatus")
+                    .find(new Document("run_id", run_id))
+                    .first();
+
+            return status != null &&
+                    (Boolean.TRUE.equals(status.getBoolean("failed")) || "FAILED".equals(status.getString("stage")));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void log(String run_id, String event, String ontology, Object data) {
+        try {
+            MongoHelper.getDatabase().getCollection("logs").insertOne(new Document()
+                    .append("run_id", run_id)
+                    .append("agent", "git-log")
+                    .append("event", event)
+                    .append("ontology", ontology)
+                    .append("data", data == null ? new Document() : Document.parse(gson.toJson(data)))
+                    .append("created_at", Instant.now().toString()));
+        } catch (Exception ignored) {}
     }
 }

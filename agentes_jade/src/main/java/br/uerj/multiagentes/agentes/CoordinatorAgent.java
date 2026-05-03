@@ -6,27 +6,18 @@ import br.uerj.multiagentes.utils.MongoHelper;
 
 import com.google.gson.Gson;
 import com.mongodb.client.MongoCollection;
-import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.UpdateOptions;
 
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpHandler;
-import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.*;
 
-import jade.core.AID;
-import jade.core.Agent;
-import jade.core.behaviours.CyclicBehaviour;
-import jade.core.behaviours.TickerBehaviour;
-import jade.lang.acl.ACLMessage;
-import jade.lang.acl.MessageTemplate;
+import jade.core.*;
+import jade.core.behaviours.*;
+import jade.lang.acl.*;
 
 import org.bson.Document;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
-import java.io.File;
 import java.io.IOException;
-import java.io.InputStreamReader;
-
 import java.net.InetSocketAddress;
 import java.time.Instant;
 import java.util.*;
@@ -35,449 +26,512 @@ import java.util.concurrent.ConcurrentHashMap;
 public class CoordinatorAgent extends Agent {
 
     private static final Gson gson = GsonProvider.get();
-
-    private static final String REPOS_DIR = env("REPOS_DIR", "/repos");
-    private static final String PROJECT_DIR_PREFIX = env("PROJECT_DIR_PREFIX", "repo");
-    private static final int WEBHOOK_PORT = Integer.parseInt(env("PORT_WEBHOOK", "8090"));
-    private static final int TICK_MS = Integer.parseInt(env("PROGRESS_TICK_MS", "2000"));
+    private static final int PORT = Integer.parseInt(System.getenv().getOrDefault("PORT_WEBHOOK", "8080"));
 
     private final Map<String, RunState> runs = new ConcurrentHashMap<>();
 
     private static class RunState {
-        volatile String stage = "IDLE";
-        volatile int pct = 0;
+        String stage = "START";
+        int pct = 0;
 
-        volatile boolean qaOk = false;
-        volatile boolean gitOk = false;
-        volatile boolean llmStarted = false;
-        volatile boolean llmOk = false;
+        boolean git = false;
+        boolean code = false;
+        boolean project = false;
+        boolean llm = false;
 
-        volatile boolean failed = false;
-        volatile boolean llmTriggered = false;
+        boolean failed = false;
+        boolean llmTriggered = false;
 
-        volatile String lastMsg = "";
-        volatile String repoPath = "";
-        volatile String repoUrl = "";
-
-        volatile int lastLoggedPct = -1;
-        volatile String lastLoggedStage = "";
-    }
-
-    private void log(String level, String runId, String event, String msg) {
-        String ts = Instant.now().toString();
-        String shortRun = runId != null ? runId.substring(0, 8) : "-";
-
-        System.out.println(String.format(
-                "%s | %-5s | run=%s | event=%s | %s",
-                ts,
-                level,
-                shortRun,
-                event,
-                msg == null ? "" : msg));
+        String repoUrl;
+        String repoPath;
     }
 
     @Override
     protected void setup() {
-        AgentDirectory.register(this, "coordinator", "coordinator");
-        startHttpServer(WEBHOOK_PORT);
 
-        System.out.println("[ CoordinatorAgent ] - REPOS_DIR = " + REPOS_DIR + "  - Pronto.");
+        System.out.println("[Coordinator] Agent iniciado.");
 
-        addBehaviour(new TickerBehaviour(this, TICK_MS) {
-            @Override
-            protected void onTick() {
-                for (Map.Entry<String, RunState> e : runs.entrySet()) {
-                    String runId = e.getKey();
-                    RunState s = e.getValue();
-                    if (s == null)
-                        continue;
-                    if (s.failed)
-                        continue;
-                    if (s.pct >= 100)
-                        continue;
+        AgentDirectory.register(this, "coordinator_agent", "coordinator_agent");
+        System.out.println("[Coordinator] Registrado no AgentDirectory como type=coordinator.");
 
-                    if (s.pct != s.lastLoggedPct || !s.stage.equals(s.lastLoggedStage)) {
-
-                        log("INFO", runId, "RUN_PROGRESS",
-                                String.format("stage=%s progress=%d%% qa=%s git=%s llm=%s msg=\"%s\"",
-                                        s.stage,
-                                        s.pct,
-                                        s.qaOk ? "ok" : "pend",
-                                        s.gitOk ? "ok" : "pend",
-                                        s.llmStarted ? (s.llmOk ? "ok" : "run") : "pend",
-                                        s.lastMsg));
-
-                        s.lastLoggedPct = s.pct;
-                        s.lastLoggedStage = s.stage;
-                    }
-
-                    setRun(runId,
-                            "stage", s.stage,
-                            "progress_pct", s.pct,
-                            "progress_at", Instant.now().toString());
-                }
-            }
-        });
+        startHttpServer(PORT);
+        System.out.println("[Coordinator] Webhook HTTP ativo na porta: " + PORT);
 
         addBehaviour(new CyclicBehaviour() {
-            @Override
             public void action() {
-                ACLMessage msg = myAgent.receive(MessageTemplate.MatchPerformative(ACLMessage.INFORM));
+
+                ACLMessage msg = receive(MessageTemplate.MatchPerformative(ACLMessage.INFORM));
+
                 if (msg == null) {
                     block();
                     return;
                 }
 
-                String ontology = msg.getOntology();
-                String content = msg.getContent();
+                System.out.println("[Coordinator] Mensagem JADE recebida.");
+                System.out.println("[Coordinator] Ontology: " + msg.getOntology());
+                System.out.println("[Coordinator] Sender: " + (msg.getSender() == null ? "UNKNOWN" : msg.getSender().getLocalName()));
+                System.out.println("[Coordinator] Content: " + msg.getContent());
 
-                Map payload = safeJsonMap(content);
-                String runId = getRunId(payload);
+                Map payload = gson.fromJson(msg.getContent(), Map.class);
+                String run_id = String.valueOf(payload.get("run_id"));
 
-                if (runId == null) {
-                    System.out.println("[ CoordinatorAgent ] - Aviso: msg sem run_id (ontology=" + ontology
-                            + ") content=" + preview(content));
+                if (run_id == null || run_id.isBlank() || "null".equals(run_id)) {
+                    System.out.println("[Coordinator] Mensagem ignorada: run_id ausente ou inválido.");
                     return;
                 }
 
-                RunState s = runs.computeIfAbsent(runId, k -> new RunState());
+                rt(run_id, "Mensagem recebida -> ontology=" + msg.getOntology());
+                rt(run_id, "Payload recebido -> " + payload);
 
-                if ("LLM_DONE".equals(ontology)) {
-                    s.llmOk = true;
-                    s.stage = "LLM_DONE";
-                    s.pct = 100;
-                    s.lastMsg = "LLM concluído";
+                RunState s = runs.computeIfAbsent(run_id, k -> new RunState());
+                log(run_id, "coordinator", "RECEIVED", msg.getOntology(), payload);
 
-                    setRun(runId,
-                            "llm_ok", true,
-                            "llm_status", "ok",
-                            "llm_completed_at", Instant.now().toString(),
-                            "stage", s.stage,
-                            "progress_pct", s.pct,
-                            "progress_at", Instant.now().toString());
-
-                    log("INFO", runId, "LLM_DONE", "Processo de análise concluído");
-                    cleanup(runId);
-                    System.exit(0);
+                if (s.failed && !"LLM_FAILED".equals(msg.getOntology())) {
+                    rt(run_id, "Mensagem tardia ignorada porque o pipeline já falhou.");
+                    log(run_id, "coordinator", "IGNORED_LATE_MESSAGE", msg.getOntology(), payload);
                     return;
                 }
 
-                if ("LLM_FAILED".equals(ontology)) {
-                    String reason = getReason(payload, content);
-                    failRun(runId, s, "LLM_FAILED", reason);
-                    return;
+                switch (msg.getOntology()) {
+
+                    case "GIT_DONE":
+                        if (isFailed(run_id, s))
+                            return;
+
+                        s.git = true;
+                        s.stage = "GIT_DONE";
+                        s.pct = 20;
+                        s.repoPath = String.valueOf(payload.get("repo_path"));
+
+                        rt(run_id, "GIT_DONE recebido. Clone finalizado.");
+                        rt(run_id, "Repo path definido como: " + s.repoPath);
+                        rt(run_id, "Progresso atualizado: 20%");
+                        rt(run_id, "Disparando análises paralelas: CodeAnalyzer + ProjectAnalyzer.");
+
+                        update(run_id, "git_ok", true);
+
+                        sendTo("code_analyzer", "START_CODE_ANALYSIS", payload);
+                        sendTo("project_analyzer", "START_PROJECT_ANALYSIS", payload);
+
+                        break;
+
+                    case "GIT_FAILED":
+                        rt(run_id, "GIT_FAILED recebido.");
+                        fail(run_id, "GIT_FAILED", payload);
+                        return;
+
+                    case "CODE_ANALYZER_DONE":
+                        if (isFailed(run_id, s))
+                            return;
+
+                        s.code = true;
+                        s.stage = "CODE_DONE";
+                        s.pct = 60;
+
+                        rt(run_id, "CODE_ANALYZER_DONE recebido. Análise de código finalizada.");
+                        rt(run_id, "Estado atual -> code=true, project=" + s.project + ", llmTriggered=" + s.llmTriggered);
+                        rt(run_id, "Progresso atualizado: 60%");
+
+                        update(run_id, "code_ok", true);
+
+                        break;
+
+                    case "PROJECT_ANALYZER_DONE":
+                        if (isFailed(run_id, s))
+                            return;
+
+                        s.project = true;
+                        s.stage = "PROJECT_DONE";
+                        s.pct = 75;
+
+                        rt(run_id, "PROJECT_ANALYZER_DONE recebido. Análise de projeto finalizada.");
+                        rt(run_id, "Estado atual -> code=" + s.code + ", project=true, llmTriggered=" + s.llmTriggered);
+                        rt(run_id, "Progresso atualizado: 75%");
+
+                        update(run_id, "project_ok", true);
+
+                        break;
+
+                    case "CODE_ANALYZER_FAILED":
+                    case "PROJECT_ANALYZER_FAILED":
+                        rt(run_id, msg.getOntology() + " recebido.");
+                        fail(run_id, msg.getOntology(), payload);
+                        return;
+
+                    case "LLM_DONE":
+                        if (isFailed(run_id, s))
+                            return;
+
+                        s.llm = true;
+                        s.stage = "DONE";
+                        s.pct = 100;
+
+                        rt(run_id, "LLM_DONE recebido. Execução LLM concluída.");
+                        rt(run_id, "Pipeline finalizado com sucesso.");
+                        rt(run_id, "Progresso atualizado: 100%");
+
+                        update(run_id,
+                                "llm_ok", true,
+                                "stage", "DONE",
+                                "progress_pct", 100,
+                                "finished_at", Instant.now().toString());
+
+                        return;
+
+                    case "LLM_FAILED":
+                        rt(run_id, "LLM_FAILED recebido.");
+                        fail(run_id, "LLM_FAILED", payload);
+                        return;
+
+                    default:
+                        rt(run_id, "Ontology não tratada: " + msg.getOntology());
+                        break;
                 }
 
-                if ("QA_DONE".equals(ontology)) {
-                    s.qaOk = true;
-                    s.stage = "QA_DONE";
-                    s.pct = Math.max(s.pct, 70);
-                    s.lastMsg = "QA concluído";
+                if (s.code && s.project && !s.llmTriggered && !s.failed) {
+                    rt(run_id, "Pré-condições para LLM satisfeitas: code=true e project=true.");
+                    rt(run_id, "Disparando LlmAgent.");
 
-                    setRun(runId, "qa_ok", true, "qa_completed_at", Instant.now().toString());
-                    log("INFO", runId, "QA_DONE", null);
-                }
-
-                if ("GIT_DONE".equals(ontology)) {
-                    s.gitOk = true;
-                    s.stage = "GIT_DONE";
-                    s.pct = Math.max(s.pct, 50);
-                    s.lastMsg = "Git concluído";
-
-                    setRun(runId, "git_ok", true, "git_completed_at", Instant.now().toString());
-                    log("INFO", runId, "GIT_DONE", null);
-                }
-
-                if ("QA_FAILED".equals(ontology) || "GIT_FAILED".equals(ontology)) {
-                    String reason = getReason(payload, content);
-                    failRun(runId, s, ontology, reason);
-                    return;
-                }
-
-                if (s.qaOk && s.gitOk && !s.failed && !s.llmTriggered) {
                     s.llmTriggered = true;
-                    s.stage = "BARRIER_OK";
-                    s.pct = Math.max(s.pct, 85);
-                    s.lastMsg = "Barreira atingida";
+                    s.stage = "LLM_RUNNING";
+                    s.pct = 90;
 
-                    log("INFO", runId, "BARRIER_OK", "Chamando LLM");
-                    triggerLlm(runId, s);
+                    update(run_id, "stage", "LLM_RUNNING", "progress_pct", 90);
+
+                    sendTo("llm", "RUN_LLM", Map.of("run_id", run_id));
                 }
+
+                update(run_id,
+                        "stage", s.stage,
+                        "progress_pct", s.pct,
+                        "updated_at", Instant.now().toString());
+
+                rt(run_id, "Status persistido -> stage=" + s.stage + ", progress_pct=" + s.pct);
             }
         });
     }
 
     private void startHttpServer(int port) {
         try {
+            System.out.println("[Coordinator] Inicializando servidor HTTP...");
             HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
             server.createContext("/webhook", new WebhookHandler());
-            server.setExecutor(null);
             server.start();
+            System.out.println("[Coordinator] Servidor HTTP iniciado em /webhook.");
         } catch (IOException e) {
+            System.out.println("[Coordinator] Erro ao iniciar servidor HTTP: " + e.getMessage());
             throw new RuntimeException(e);
         }
     }
 
     class WebhookHandler implements HttpHandler {
-        @Override
-        public void handle(HttpExchange exchange) throws IOException {
+        public void handle(HttpExchange ex) throws IOException {
 
-            if (!exchange.getRequestMethod().equalsIgnoreCase("POST")) {
-                exchange.sendResponseHeaders(405, -1);
-                return;
-            }
+            System.out.println("[Webhook] Requisição recebida.");
 
-            String body = new String(exchange.getRequestBody().readAllBytes());
+            String body = new String(ex.getRequestBody().readAllBytes());
+            System.out.println("[Webhook] Body recebido: " + body);
+
             JSONObject json = new JSONObject(body);
 
-            String repoUrl = json.getString("repository");
+            String requestedRepo = json.getString("repository");
+            String gitRef = extractGitRef(json, requestedRepo);
+            String repo = normalizeRepositoryUrl(requestedRepo);
+            String run_id = UUID.randomUUID().toString();
+            String repoName = extract(repo);
+            String repoPath = "/repos/" + repoName;
+            String sonarProjectKey = buildSonarProjectKey(repo);
+            String sonarProjectName = repoName;
 
-            new File(REPOS_DIR).mkdirs();
+            System.out.println("[Webhook] Repository requested: " + requestedRepo);
+            System.out.println("[Webhook] Repository clone URL: " + repo);
+            System.out.println("[Webhook] Git ref: " + gitRef);
+            System.out.println("[Webhook] Run ID criado: " + run_id);
+            System.out.println("[Webhook] Repo name: " + repoName);
+            System.out.println("[Webhook] Repo path: " + repoPath);
+            System.out.println("[Webhook] Sonar project key: " + sonarProjectKey);
+            System.out.println("[Webhook] Sonar project name: " + sonarProjectName);
 
-            String runId = UUID.randomUUID().toString();
-            String repoName = extractRepoName(repoUrl);
-            String repoPath = REPOS_DIR + "/" + PROJECT_DIR_PREFIX + "-" + repoName;
-
-            RunState s = runs.computeIfAbsent(runId, k -> new RunState());
-            s.repoUrl = repoUrl;
+            RunState s = new RunState();
+            s.repoUrl = repo;
             s.repoPath = repoPath;
-            s.stage = "CLONE";
-            s.pct = 5;
-            s.lastMsg = "Clonando/atualizando repositório...";
 
-            createRunStatus(runId, repoUrl, repoPath);
+            runs.put(run_id, s);
 
-            String log;
-            File repoDir = new File(repoPath);
-            if (repoDir.exists() && new File(repoPath + "/.git").exists()) {
-                log("INFO", runId, "REPO_START", "Repositório será atualizado");
-                log = runGitPull(repoPath);
-            } else {
-                log("INFO", runId, "REPO_START", "Repositório será baixado");
-                deleteDirectory(repoDir);
-                repoDir.mkdirs();
-                log = runGitClone(repoUrl, repoPath);
-            }
+            rt(run_id, "RunState criado em memória.");
 
-            boolean ok = !(log.toLowerCase().contains("fatal") || log.toLowerCase().contains("error"));
+            create(run_id, repo, repoPath, gitRef, sonarProjectKey, sonarProjectName);
 
-            JSONObject response = new JSONObject();
-            response.put("run_id", runId);
-            response.put("repo_path", repoPath);
-            response.put("ok", ok);
-            response.put("log", log);
+            rt(run_id, "Enviando comando RUN_GIT para GitAgent.");
 
-            if (ok) {
-                s.stage = "REPO_READY";
-                s.pct = 15;
-                s.lastMsg = "Repo pronto. Disparando análises...";
+            sendTo("git", "RUN_GIT", Map.of(
+                    "run_id", run_id,
+                    "repo_url", repo,
+                    "repo_path", repoPath,
+                    "git_ref", gitRef,
+                    "sonar_project_key", sonarProjectKey,
+                    "sonar_project_name", sonarProjectName));
 
-                setRun(runId, "git_clone_ok", true, "repo_ready_at", Instant.now().toString());
-                sendRepoReady(runId, repoUrl, repoPath);
+            respond(ex, run_id);
 
-            } else {
-                failRun(runId, s, "GIT_CLONE_FAILED", "git clone/pull failed");
-                setRun(runId, "git_clone_ok", false, "failed_at", Instant.now().toString());
-            }
-
-            byte[] respBytes = response.toString().getBytes();
-            exchange.sendResponseHeaders(200, respBytes.length);
-            exchange.getResponseBody().write(respBytes);
-            exchange.close();
+            rt(run_id, "Resposta HTTP enviada ao cliente.");
         }
     }
 
-    private String extractRepoName(String repoUrl) {
-        String name = repoUrl.substring(repoUrl.lastIndexOf("/") + 1);
-        if (name.endsWith(".git")) {
-            name = name.substring(0, name.length() - 4);
-        }
-        return name.replaceAll("[^a-zA-Z0-9-_\\.]", "_");
-    }
+    private void sendTo(String type, String ontology, Map payload) {
 
-    private void sendRepoReady(String runId, String repoUrl, String repoPath) {
-        Map<String, Object> payload = Map.of(
-                "run_id", runId,
-                "repo_url", repoUrl,
-                "repo_path", repoPath);
+        System.out.println("[Coordinator][JADE-SEND] Preparando envio.");
+        System.out.println("[Coordinator][JADE-SEND] Destination type: " + type);
+        System.out.println("[Coordinator][JADE-SEND] Ontology: " + ontology);
+        System.out.println("[Coordinator][JADE-SEND] Payload: " + payload);
 
-        sendToService("code-analyzer", new AID("code_analyzer_agent", AID.ISLOCALNAME),
-                "REPO_READY", payload);
+        ACLMessage msg = new ACLMessage(ACLMessage.INFORM);
+        msg.setOntology(ontology);
+        msg.setContent(gson.toJson(payload));
 
-        sendToService("git-log", new AID("git_log_agent", AID.ISLOCALNAME),
-                "REPO_READY", payload);
+        List<AID> agents = AgentDirectory.find(this, type);
 
-        RunState s = runs.computeIfAbsent(runId, k -> new RunState());
-        s.stage = "ANALYSIS_RUNNING";
-        s.pct = 25;
-        s.lastMsg = "QA/Git em andamento...";
+        if (agents != null && !agents.isEmpty()) {
+            System.out.println("[Coordinator][JADE-SEND] Agentes encontrados no AgentDirectory: " + agents.size());
 
-        log("INFO", runId, "REPO_READY", "path=" + repoPath);
-    }
-
-    private void triggerLlm(String runId, RunState s) {
-        if (s.failed)
-            return;
-
-        sendToService("llm", new AID("llm_agent", AID.ISLOCALNAME),
-                "RUN_LLM", Map.of("run_id", runId));
-
-        s.llmStarted = true;
-        s.stage = "LLM_RUNNING";
-        s.pct = Math.max(s.pct, 90);
-        s.lastMsg = "LLM analisando...";
-
-        setRun(runId, "llm_started_at", Instant.now().toString());
-    }
-
-    private void sendToService(String serviceType, AID fallback, String ontology, Map<String, Object> payload) {
-        List<AID> found = AgentDirectory.find(this, serviceType);
-
-        ACLMessage m = new ACLMessage(ACLMessage.INFORM);
-        m.setOntology(ontology);
-        m.setContent(gson.toJson(payload));
-
-        if (found != null && !found.isEmpty()) {
-            for (AID a : found)
-                m.addReceiver(a);
+            for (AID agent : agents) {
+                System.out.println("[Coordinator][JADE-SEND] Receiver: " + agent.getLocalName());
+                msg.addReceiver(agent);
+            }
         } else {
-            m.addReceiver(fallback);
+            AID fallback = new AID(type + "_agent", AID.ISLOCALNAME);
+            System.out.println("[Coordinator][JADE-SEND] Nenhum agente encontrado no AgentDirectory.");
+            System.out.println("[Coordinator][JADE-SEND] Usando fallback receiver: " + fallback.getLocalName());
+            msg.addReceiver(fallback);
         }
-        send(m);
+
+        send(msg);
+
+        System.out.println("[Coordinator][JADE-SEND] Mensagem enviada com sucesso.");
     }
 
-    private void failRun(String runId, RunState s, String type, String reason) {
-        s.failed = true;
-        s.stage = "FAILED";
-        s.pct = 100;
-        s.lastMsg = type + " - " + reason;
+    private void fail(String run_id, String type, Map payload) {
 
-        setRun(runId,
+        RunState s = runs.get(run_id);
+        Object reason = payload == null ? type : payload.getOrDefault("reason", type);
+
+        rt(run_id, "Pipeline marcado como FAILED.");
+        rt(run_id, "Tipo da falha: " + type);
+        rt(run_id, "Motivo: " + reason);
+
+        if (s != null) {
+            s.failed = true;
+            s.stage = "FAILED";
+            s.pct = 100;
+
+            rt(run_id, "RunState em memória atualizado para FAILED.");
+        } else {
+            rt(run_id, "RunState não encontrado em memória durante falha.");
+        }
+
+        update(run_id,
                 "failed", true,
-                "failed_type", type,
-                "failed_reason", reason,
-                "failed_at", Instant.now().toString(),
-                "stage", s.stage,
-                "progress_pct", s.pct,
-                "progress_at", Instant.now().toString());
+                "reason", reason,
+                "stage", "FAILED",
+                "progress_pct", 100,
+                "failed_at", Instant.now().toString());
 
-        log("ERROR", runId, type, "reason=\"" + reason + "\"");
-        cleanup(runId);
+        log(run_id, "coordinator", "FAILED", type, Map.of("reason", reason));
+
+        rt(run_id, "Falha persistida no MongoDB.");
     }
 
-    private void cleanup(String runId) {
+    private void create(String run_id, String url, String path, String gitRef, String sonarProjectKey, String sonarProjectName) {
+
+        rt(run_id, "Criando registro inicial no MongoDB.");
+
+        MongoCollection<Document> col = MongoHelper.getDatabase().getCollection("runStatus");
+
+        col.updateOne(new Document("run_id", run_id),
+                new Document("$setOnInsert", new Document("run_id", run_id)
+                        .append("repo_url", url)
+                        .append("repo_path", path)
+                        .append("git_ref", gitRef)
+                        .append("sonar_project_key", sonarProjectKey)
+                        .append("sonar_project_name", sonarProjectName)
+                        .append("created_at", Instant.now().toString())
+                        .append("stage", "START")
+                        .append("progress_pct", 0)
+                        .append("failed", false)),
+                new UpdateOptions().upsert(true));
+
+        rt(run_id, "Registro inicial criado/garantido no MongoDB.");
+
+        log(run_id, "coordinator", "RUN_CREATED", "RUN_GIT", Map.of(
+                "repo_url", url,
+                "repo_path", path,
+                "git_ref", gitRef,
+                "sonar_project_key", sonarProjectKey,
+                "sonar_project_name", sonarProjectName));
     }
 
-    private static String env(String k, String def) {
-        String v = System.getenv(k);
-        return (v == null || v.isBlank()) ? def : v;
-    }
+    private void update(String run_id, Object... kv) {
 
-    private Map safeJsonMap(String content) {
-        if (content == null)
-            return null;
-        String s = content.trim();
-        if (!s.startsWith("{"))
-            return null;
-        try {
-            return gson.fromJson(s, Map.class);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    private String getRunId(Map payload) {
-        if (payload == null)
-            return null;
-        Object v = payload.get("run_id");
-        if (v == null)
-            return null;
-        String s = String.valueOf(v);
-        return ("null".equals(s) || s.isBlank()) ? null : s;
-    }
-
-    private String getReason(Map payload, String rawContent) {
-        if (payload != null && payload.get("reason") != null)
-            return String.valueOf(payload.get("reason"));
-        return preview(rawContent);
-    }
-
-    private String preview(String s) {
-        if (s == null)
-            return "";
-        s = s.replace("\n", "\\n");
-        return s.length() > 220 ? s.substring(0, 220) + "..." : s;
-    }
-
-    private void createRunStatus(String runId, String repoUrl, String repoPath) {
-        MongoDatabase db = MongoHelper.getDatabase();
-        MongoCollection<Document> runsCol = db.getCollection("run_status");
-
-        Document doc = new Document()
-                .append("run_id", runId)
-                .append("repo_url", repoUrl)
-                .append("repo_path", repoPath)
-                .append("created_at", Instant.now().toString())
-                .append("git_clone_ok", null)
-                .append("qa_ok", null)
-                .append("git_ok", null)
-                .append("llm_ok", null)
-                .append("failed", false)
-                .append("stage", "CLONE")
-                .append("progress_pct", 0);
-
-        runsCol.insertOne(doc);
-    }
-
-    private void setRun(String runId, Object... kv) {
-        MongoDatabase db = MongoHelper.getDatabase();
-        MongoCollection<Document> runsCol = db.getCollection("run_status");
+        MongoCollection<Document> col = MongoHelper.getDatabase().getCollection("runStatus");
 
         Document set = new Document();
-        for (int i = 0; i + 1 < kv.length; i += 2) {
+
+        for (int i = 0; i < kv.length; i += 2) {
             set.append(String.valueOf(kv[i]), kv[i + 1]);
         }
 
-        runsCol.updateOne(new Document("run_id", runId), new Document("$set", set));
+        System.out.println("[Coordinator][MongoUpdate][run=" + run_id + "] " + set.toJson());
+
+        col.updateOne(new Document("run_id", run_id),
+                new Document("$set", set),
+                new UpdateOptions().upsert(true));
     }
 
-    private String runGitClone(String url, String path) {
-        return runCommand(new ProcessBuilder("git", "clone", url, path));
+    private boolean isFailed(String run_id, RunState s) {
+        if (s != null && s.failed) {
+            rt(run_id, "Mensagem ignorada: RunState já está FAILED.");
+            log(run_id, "coordinator", "IGNORED_AFTER_FAILED", s.stage, Map.of());
+            return true;
+        }
+
+        Document status = MongoHelper.getDatabase()
+                .getCollection("runStatus")
+                .find(new Document("run_id", run_id))
+                .first();
+
+        boolean failed = status != null &&
+                (Boolean.TRUE.equals(status.getBoolean("failed")) || "FAILED".equals(status.getString("stage")));
+
+        if (failed && s != null) {
+            s.failed = true;
+            s.stage = "FAILED";
+            s.pct = 100;
+
+            rt(run_id, "Mensagem ignorada: MongoDB indica stage FAILED.");
+            log(run_id, "coordinator", "IGNORED_AFTER_FAILED", "FAILED_IN_MONGO", Map.of());
+        }
+
+        return failed;
     }
 
-    private String runGitPull(String path) {
-        return runCommand(new ProcessBuilder("git", "-C", path, "pull"));
-    }
-
-    private String runCommand(ProcessBuilder pb) {
-        StringBuilder output = new StringBuilder();
+    private void log(String run_id, String agent, String event, String ontology, Object data) {
         try {
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null)
-                    output.append(line).append("\n");
-            }
-            process.waitFor();
+            MongoHelper.getDatabase().getCollection("logs").insertOne(new Document()
+                    .append("run_id", run_id)
+                    .append("agent", agent)
+                    .append("event", event)
+                    .append("ontology", ontology)
+                    .append("data", data == null ? new Document() : Document.parse(gson.toJson(data)))
+                    .append("created_at", Instant.now().toString()));
+
+            System.out.println("[Coordinator][MongoLog][run=" + run_id + "] "
+                    + "agent=" + agent
+                    + ", event=" + event
+                    + ", ontology=" + ontology);
+
         } catch (Exception e) {
-            output.append(e.getMessage());
+            System.out.println("[Coordinator][MongoLog][run=" + run_id + "] Falha ao registrar log: " + e.getMessage());
         }
-        return output.toString();
     }
 
-    private void deleteDirectory(File dir) {
-        if (!dir.exists())
-            return;
-        File[] files = dir.listFiles();
-        if (files != null) {
-            for (File f : files) {
-                if (f.isDirectory())
-                    deleteDirectory(f);
-                else
-                    f.delete();
+    private void respond(HttpExchange ex, String run_id) throws IOException {
+
+        JSONObject r = new JSONObject();
+        r.put("run_id", run_id);
+
+        byte[] out = r.toString().getBytes();
+
+        ex.sendResponseHeaders(200, out.length);
+        ex.getResponseBody().write(out);
+        ex.close();
+
+        rt(run_id, "HTTP 200 enviado com body: " + r);
+    }
+
+    private String extract(String url) {
+        String n = url.substring(url.lastIndexOf("/") + 1);
+        String repoName = n.replace(".git", "");
+
+        System.out.println("[Coordinator] Nome do repositório extraído: " + repoName);
+
+        return repoName;
+    }
+
+    private String extractGitRef(JSONObject json, String repoUrl) {
+        for (String key : List.of("git_ref", "branch", "version", "ref")) {
+            if (json.has(key) && !json.isNull(key)) {
+                String value = json.optString(key, "").trim();
+                if (!value.isBlank()) {
+                    return value;
+                }
             }
         }
-        dir.delete();
+
+        String marker = "/tree/";
+        int idx = repoUrl == null ? -1 : repoUrl.indexOf(marker);
+        if (idx >= 0) {
+            String value = repoUrl.substring(idx + marker.length()).trim();
+            return value.isBlank() ? "" : value;
+        }
+
+        return "";
+    }
+
+    private String normalizeRepositoryUrl(String repoUrl) {
+        String normalized = repoUrl == null ? "" : repoUrl.trim();
+        int treeIdx = normalized.indexOf("/tree/");
+        if (treeIdx >= 0) {
+            normalized = normalized.substring(0, treeIdx);
+        }
+
+        if (normalized.startsWith("https://github.com/") && !normalized.endsWith(".git")) {
+            normalized = normalized + ".git";
+        }
+
+        return normalized;
+    }
+
+    private String buildSonarProjectKey(String repoUrl) {
+        String normalized = repoUrl == null ? "repository" : repoUrl.trim();
+
+        if (normalized.endsWith(".git")) {
+            normalized = normalized.substring(0, normalized.length() - 4);
+        }
+
+        normalized = normalized.replace('\\', '/');
+        String[] parts = normalized.split("/");
+        String repo = parts.length > 0 ? parts[parts.length - 1] : "repository";
+        String owner = parts.length > 1 ? parts[parts.length - 2] : "local";
+
+        String key = "sma:" + sanitizeSonarKeyPart(owner) + ":" + sanitizeSonarKeyPart(repo);
+
+        if (key.matches("[0-9:._-]+")) {
+            key = "sma:repo:" + key;
+        }
+
+        System.out.println("[Coordinator] Sonar project key gerada: " + key);
+
+        return key;
+    }
+
+    private String sanitizeSonarKeyPart(String value) {
+        String sanitized = value == null ? "" : value.replaceAll("[^A-Za-z0-9._:-]", "-");
+        sanitized = sanitized.replaceAll("-+", "-");
+        sanitized = sanitized.replaceAll("^[.:-]+|[.:-]+$", "");
+
+        String result = sanitized.isBlank() ? "repository" : sanitized;
+
+        System.out.println("[Coordinator] Sanitized Sonar key part: " + value + " -> " + result);
+
+        return result;
+    }
+
+    private void rt(String runId, String msg) {
+        System.out.printf(
+                "[%s][Coordinator][run=%s] %s%n",
+                Instant.now(),
+                runId,
+                msg
+        );
     }
 }
