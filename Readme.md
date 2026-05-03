@@ -134,7 +134,17 @@ Ou, para o worker do Sonar:
 docker compose logs -f sonar-worker
 ```
 
-## 4. Dispare uma análise
+## 4. Use a interface web
+
+Com o container `jade` rodando, abra:
+
+```text
+http://localhost:8090/
+```
+
+A interface permite iniciar uma análise, acompanhar o progresso do `CoordinatorAgent`, ver erros, consultar o relatório do LLM e navegar pelo dashboard de projetos já analisados.
+
+## 5. Dispare uma análise via HTTP
 
 Envie um repositório Git para o webhook:
 (Repositório para testes rápidos, os links dos repositórios usados na pesquisa se encontram no final do arquivo)
@@ -175,7 +185,7 @@ A resposta terá um `run_id`:
 
 Guarde esse valor. Ele identifica a execução no MongoDB.
 
-## 5. Acompanhe o status no MongoDB
+## 6. Acompanhe o status no MongoDB
 
 Entre no container do Mongo:
 
@@ -420,7 +430,7 @@ curl -X POST http://localhost:8090/webhook \
 ```
 
 ### Joomla
-- Versões 5.4.x, 5.3.x, 5.2.x, 5.1.x e 5.0.x
+- Versões 5.4.2, 5.4.3, 5.4.4, 5.4.5 e 6.0.0
 - Pegamos as versões mais recentes de cada branch para análise, disponíveis em https://downloads.joomla.org/
 ```bash
 curl -X POST http://localhost:8090/webhook \

@@ -6,6 +6,7 @@ import br.uerj.multiagentes.utils.MongoHelper;
 
 import com.google.gson.Gson;
 import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.UpdateOptions;
 
 import com.sun.net.httpserver.*;
@@ -18,7 +19,9 @@ import org.bson.Document;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -126,11 +129,11 @@ public class CoordinatorAgent extends Agent {
 
                         s.code = true;
                         s.stage = "CODE_DONE";
-                        s.pct = 60;
+                        s.pct += 35;
 
                         rt(run_id, "CODE_ANALYZER_DONE recebido. Análise de código finalizada.");
                         rt(run_id, "Estado atual -> code=true, project=" + s.project + ", llmTriggered=" + s.llmTriggered);
-                        rt(run_id, "Progresso atualizado: 60%");
+                        rt(run_id, "Progresso atualizado: " + s.pct + "%");
 
                         update(run_id, "code_ok", true);
 
@@ -142,11 +145,11 @@ public class CoordinatorAgent extends Agent {
 
                         s.project = true;
                         s.stage = "PROJECT_DONE";
-                        s.pct = 75;
+                        s.pct += 35;
 
                         rt(run_id, "PROJECT_ANALYZER_DONE recebido. Análise de projeto finalizada.");
                         rt(run_id, "Estado atual -> code=" + s.code + ", project=true, llmTriggered=" + s.llmTriggered);
-                        rt(run_id, "Progresso atualizado: 75%");
+                        rt(run_id, "Progresso atualizado: " + s.pct + "%");
 
                         update(run_id, "project_ok", true);
 
@@ -216,8 +219,10 @@ public class CoordinatorAgent extends Agent {
             System.out.println("[Coordinator] Inicializando servidor HTTP...");
             HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
             server.createContext("/webhook", new WebhookHandler());
+            server.createContext("/api/runs", new RunsApiHandler());
+            server.createContext("/", new StaticHandler());
             server.start();
-            System.out.println("[Coordinator] Servidor HTTP iniciado em /webhook.");
+            System.out.println("[Coordinator] Servidor HTTP iniciado em /, /webhook e /api/runs.");
         } catch (IOException e) {
             System.out.println("[Coordinator] Erro ao iniciar servidor HTTP: " + e.getMessage());
             throw new RuntimeException(e);
@@ -275,6 +280,88 @@ public class CoordinatorAgent extends Agent {
             respond(ex, run_id);
 
             rt(run_id, "Resposta HTTP enviada ao cliente.");
+        }
+    }
+
+    class RunsApiHandler implements HttpHandler {
+        public void handle(HttpExchange ex) throws IOException {
+            if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) {
+                sendJson(ex, 204, "");
+                return;
+            }
+
+            if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+                sendJson(ex, 405, new Document("error", "method_not_allowed").toJson());
+                return;
+            }
+
+            try {
+                String path = ex.getRequestURI().getPath();
+                String prefix = "/api/runs";
+                String rest = path.length() > prefix.length() ? path.substring(prefix.length()) : "";
+
+                if (rest.isBlank() || "/".equals(rest)) {
+                    sendJson(ex, 200, listRunsJson());
+                    return;
+                }
+
+                String runId = rest.startsWith("/") ? rest.substring(1) : rest;
+                int slash = runId.indexOf('/');
+                if (slash >= 0) {
+                    runId = runId.substring(0, slash);
+                }
+
+                sendJson(ex, 200, loadRunJson(runId));
+            } catch (Exception e) {
+                sendJson(ex, 500, new Document("error", e.getMessage()).toJson());
+            }
+        }
+    }
+
+    class StaticHandler implements HttpHandler {
+        public void handle(HttpExchange ex) throws IOException {
+            if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) {
+                sendPlain(ex, 204, "", "text/plain; charset=utf-8");
+                return;
+            }
+
+            if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+                sendPlain(ex, 405, "Method not allowed", "text/plain; charset=utf-8");
+                return;
+            }
+
+            String path = ex.getRequestURI().getPath();
+            String resource = switch (path) {
+                case "/", "/index.html" -> "public/index.html";
+                case "/app.css" -> "public/app.css";
+                case "/app.js" -> "public/app.js";
+                default -> null;
+            };
+
+            if (resource == null) {
+                sendPlain(ex, 404, "Not found", "text/plain; charset=utf-8");
+                return;
+            }
+
+            try (InputStream in = getClass().getClassLoader().getResourceAsStream(resource)) {
+                if (in == null) {
+                    sendPlain(ex, 404, "Not found", "text/plain; charset=utf-8");
+                    return;
+                }
+
+                String contentType = resource.endsWith(".css")
+                        ? "text/css; charset=utf-8"
+                        : resource.endsWith(".js")
+                        ? "application/javascript; charset=utf-8"
+                        : "text/html; charset=utf-8";
+
+                byte[] out = in.readAllBytes();
+                addCors(ex);
+                ex.getResponseHeaders().set("Content-Type", contentType);
+                ex.sendResponseHeaders(200, out.length);
+                ex.getResponseBody().write(out);
+                ex.close();
+            }
         }
     }
 
@@ -446,6 +533,79 @@ public class CoordinatorAgent extends Agent {
         ex.close();
 
         rt(run_id, "HTTP 200 enviado com body: " + r);
+    }
+
+    private String listRunsJson() {
+        MongoDatabase db = MongoHelper.getDatabase();
+        List<String> items = new ArrayList<>();
+
+        for (Document status : db.getCollection("runStatus")
+                .find()
+                .sort(new Document("created_at", -1))
+                .limit(100)) {
+            String runId = status.getString("run_id");
+            Document item = new Document("status", status)
+                    .append("code_metrics", findOne(db, "code_metrics", runId))
+                    .append("project", findOne(db, "projectsReport", runId))
+                    .append("llm_report", findOne(db, "llm_reports", runId));
+            items.add(item.toJson());
+        }
+
+        return "[" + String.join(",", items) + "]";
+    }
+
+    private String loadRunJson(String runId) {
+        MongoDatabase db = MongoHelper.getDatabase();
+        Document doc = new Document("run_id", runId)
+                .append("status", findOne(db, "runStatus", runId))
+                .append("code_metrics", findOne(db, "code_metrics", runId))
+                .append("sonar_metrics", findOne(db, "sonar_metrics", runId))
+                .append("project", findOne(db, "projectsReport", runId))
+                .append("code_report", findOne(db, "codeReport", runId))
+                .append("llm_report", findOne(db, "llm_reports", runId))
+                .append("logs", findMany(db, "logs", runId, 120));
+        return doc.toJson();
+    }
+
+    private Document findOne(MongoDatabase db, String collection, String runId) {
+        if (runId == null) {
+            return null;
+        }
+        return db.getCollection(collection).find(new Document("run_id", runId)).first();
+    }
+
+    private List<Document> findMany(MongoDatabase db, String collection, String runId, int limit) {
+        List<Document> out = new ArrayList<>();
+        if (runId == null) {
+            return out;
+        }
+
+        for (Document doc : db.getCollection(collection)
+                .find(new Document("run_id", runId))
+                .sort(new Document("created_at", 1))
+                .limit(limit)) {
+            out.add(doc);
+        }
+        return out;
+    }
+
+    private void sendJson(HttpExchange ex, int status, String json) throws IOException {
+        sendPlain(ex, status, json == null ? "" : json, "application/json; charset=utf-8");
+    }
+
+    private void sendPlain(HttpExchange ex, int status, String text, String contentType) throws IOException {
+        byte[] out = text == null ? new byte[0] : text.getBytes(StandardCharsets.UTF_8);
+        addCors(ex);
+        ex.getResponseHeaders().set("Content-Type", contentType);
+        ex.sendResponseHeaders(status, out.length);
+        ex.getResponseBody().write(out);
+        ex.close();
+    }
+
+    private void addCors(HttpExchange ex) {
+        ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        ex.getResponseHeaders().set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+        ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
     }
 
     private String extract(String url) {
