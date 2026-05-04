@@ -1,0 +1,48 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Java / Maven
+target/
+*.class
+*.jar
+!agentes_jade/libs/jade.jar
+dependency-reduced-pom.xml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime output
+logs/
+*.log
+cache/
+tmp/
+.sma/
+
+# Local agent/tooling state
+.codex/
+.agents/
