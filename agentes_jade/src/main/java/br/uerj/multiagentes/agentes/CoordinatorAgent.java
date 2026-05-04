@@ -25,11 +25,21 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
 
 public class CoordinatorAgent extends Agent {
 
     private static final Gson gson = GsonProvider.get();
     private static final int PORT = Integer.parseInt(System.getenv().getOrDefault("PORT_WEBHOOK", "8080"));
+    private static final Set<String> PIPELINE_ONTOLOGIES = Set.of(
+            "GIT_DONE",
+            "GIT_FAILED",
+            "CODE_ANALYZER_DONE",
+            "CODE_ANALYZER_FAILED",
+            "PROJECT_ANALYZER_DONE",
+            "PROJECT_ANALYZER_FAILED",
+            "LLM_DONE",
+            "LLM_FAILED");
 
     private final Map<String, RunState> runs = new ConcurrentHashMap<>();
 
@@ -75,7 +85,21 @@ public class CoordinatorAgent extends Agent {
                 System.out.println("[Coordinator] Sender: " + (msg.getSender() == null ? "UNKNOWN" : msg.getSender().getLocalName()));
                 System.out.println("[Coordinator] Content: " + msg.getContent());
 
-                Map payload = gson.fromJson(msg.getContent(), Map.class);
+                String ontology = msg.getOntology();
+                if (!PIPELINE_ONTOLOGIES.contains(ontology)) {
+                    System.out.println("[Coordinator] Mensagem ignorada: ontology fora do pipeline: " + ontology);
+                    return;
+                }
+
+                Map payload;
+                try {
+                    payload = gson.fromJson(msg.getContent(), Map.class);
+                } catch (Exception parseError) {
+                    System.out.println("[Coordinator] Mensagem ignorada: conteúdo não-JSON para ontology="
+                            + ontology + " erro=" + parseError.getMessage());
+                    return;
+                }
+
                 String run_id = String.valueOf(payload.get("run_id"));
 
                 if (run_id == null || run_id.isBlank() || "null".equals(run_id)) {
@@ -83,19 +107,19 @@ public class CoordinatorAgent extends Agent {
                     return;
                 }
 
-                rt(run_id, "Mensagem recebida -> ontology=" + msg.getOntology());
+                rt(run_id, "Mensagem recebida -> ontology=" + ontology);
                 rt(run_id, "Payload recebido -> " + payload);
 
                 RunState s = runs.computeIfAbsent(run_id, k -> new RunState());
-                log(run_id, "coordinator", "RECEIVED", msg.getOntology(), payload);
+                log(run_id, "coordinator", "RECEIVED", ontology, payload);
 
-                if (s.failed && !"LLM_FAILED".equals(msg.getOntology())) {
+                if (s.failed && !"LLM_FAILED".equals(ontology)) {
                     rt(run_id, "Mensagem tardia ignorada porque o pipeline já falhou.");
-                    log(run_id, "coordinator", "IGNORED_LATE_MESSAGE", msg.getOntology(), payload);
+                    log(run_id, "coordinator", "IGNORED_LATE_MESSAGE", ontology, payload);
                     return;
                 }
 
-                switch (msg.getOntology()) {
+                switch (ontology) {
 
                     case "GIT_DONE":
                         if (isFailed(run_id, s))
@@ -157,8 +181,8 @@ public class CoordinatorAgent extends Agent {
 
                     case "CODE_ANALYZER_FAILED":
                     case "PROJECT_ANALYZER_FAILED":
-                        rt(run_id, msg.getOntology() + " recebido.");
-                        fail(run_id, msg.getOntology(), payload);
+                        rt(run_id, ontology + " recebido.");
+                        fail(run_id, ontology, payload);
                         return;
 
                     case "LLM_DONE":
@@ -187,7 +211,7 @@ public class CoordinatorAgent extends Agent {
                         return;
 
                     default:
-                        rt(run_id, "Ontology não tratada: " + msg.getOntology());
+                        rt(run_id, "Ontology não tratada: " + ontology);
                         break;
                 }
 
@@ -221,6 +245,7 @@ public class CoordinatorAgent extends Agent {
             server.createContext("/webhook", new WebhookHandler());
             server.createContext("/api/runs", new RunsApiHandler());
             server.createContext("/", new StaticHandler());
+            server.setExecutor(Executors.newCachedThreadPool());
             server.start();
             System.out.println("[Coordinator] Servidor HTTP iniciado em /, /webhook e /api/runs.");
         } catch (IOException e) {
@@ -244,13 +269,15 @@ public class CoordinatorAgent extends Agent {
             String repo = normalizeRepositoryUrl(requestedRepo);
             String run_id = UUID.randomUUID().toString();
             String repoName = extract(repo);
-            String repoPath = "/repos/" + repoName;
-            String sonarProjectKey = buildSonarProjectKey(repo);
-            String sonarProjectName = repoName;
+            String safeVersion = safeVersion(gitRef);
+            String repoPath = "/repos/" + repoName + ":" + safeVersion;
+            String sonarProjectKey = buildSonarProjectKey(repo, safeVersion);
+            String sonarProjectName = repoPath;
 
             System.out.println("[Webhook] Repository requested: " + requestedRepo);
             System.out.println("[Webhook] Repository clone URL: " + repo);
             System.out.println("[Webhook] Git ref: " + gitRef);
+            System.out.println("[Webhook] Safe version: " + safeVersion);
             System.out.println("[Webhook] Run ID criado: " + run_id);
             System.out.println("[Webhook] Repo name: " + repoName);
             System.out.println("[Webhook] Repo path: " + repoPath);
@@ -274,6 +301,7 @@ public class CoordinatorAgent extends Agent {
                     "repo_url", repo,
                     "repo_path", repoPath,
                     "git_ref", gitRef,
+                    "safe_version", safeVersion,
                     "sonar_project_key", sonarProjectKey,
                     "sonar_project_name", sonarProjectName));
 
@@ -305,10 +333,19 @@ public class CoordinatorAgent extends Agent {
                     return;
                 }
 
-                String runId = rest.startsWith("/") ? rest.substring(1) : rest;
-                int slash = runId.indexOf('/');
-                if (slash >= 0) {
-                    runId = runId.substring(0, slash);
+                String route = rest.startsWith("/") ? rest.substring(1) : rest;
+                String[] parts = route.split("/");
+                String runId = parts.length > 0 ? parts[0] : "";
+                String action = parts.length > 1 ? parts[1] : "";
+
+                if ("status".equals(action)) {
+                    sendJson(ex, 200, loadRunStatusJson(runId));
+                    return;
+                }
+
+                if ("events".equals(action)) {
+                    streamRunEvents(ex, runId);
+                    return;
                 }
 
                 sendJson(ex, 200, loadRunJson(runId));
@@ -439,6 +476,7 @@ public class CoordinatorAgent extends Agent {
                         .append("repo_url", url)
                         .append("repo_path", path)
                         .append("git_ref", gitRef)
+                        .append("safe_version", safeVersion(gitRef))
                         .append("sonar_project_key", sonarProjectKey)
                         .append("sonar_project_name", sonarProjectName)
                         .append("created_at", Instant.now().toString())
@@ -453,6 +491,7 @@ public class CoordinatorAgent extends Agent {
                 "repo_url", url,
                 "repo_path", path,
                 "git_ref", gitRef,
+                "safe_version", safeVersion(gitRef),
                 "sonar_project_key", sonarProjectKey,
                 "sonar_project_name", sonarProjectName));
     }
@@ -567,6 +606,80 @@ public class CoordinatorAgent extends Agent {
         return doc.toJson();
     }
 
+    private String loadRunStatusJson(String runId) {
+        MongoDatabase db = MongoHelper.getDatabase();
+        Document status = findOne(db, "runStatus", runId);
+        Document report = findOne(db, "llm_reports", runId);
+
+        Document doc = new Document("run_id", runId)
+                .append("status", status)
+                .append("terminal", isTerminal(status))
+                .append("llm_report_available", report != null)
+                .append("server_time", Instant.now().toString());
+
+        return doc.toJson();
+    }
+
+    private void streamRunEvents(HttpExchange ex, String runId) throws IOException {
+        addCors(ex);
+        ex.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
+        ex.getResponseHeaders().set("Cache-Control", "no-cache");
+        ex.getResponseHeaders().set("Connection", "keep-alive");
+        ex.sendResponseHeaders(200, 0);
+
+        int maxSeconds = Integer.parseInt(System.getenv().getOrDefault("RUN_EVENTS_MAX_SECONDS", "3600"));
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        String lastPayload = "";
+
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                String payload = loadRunJson(runId);
+                if (!payload.equals(lastPayload)) {
+                    writeSse(ex, "run", payload);
+                    lastPayload = payload;
+                } else {
+                    writeSse(ex, "heartbeat", new Document("server_time", Instant.now().toString()).toJson());
+                }
+
+                Document status = MongoHelper.getDatabase()
+                        .getCollection("runStatus")
+                        .find(new Document("run_id", runId))
+                        .first();
+
+                if (isTerminal(status)) {
+                    writeSse(ex, "done", loadRunStatusJson(runId));
+                    break;
+                }
+
+                Thread.sleep(1500);
+            }
+        } catch (IOException ignored) {
+            // Client disconnected.
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            ex.close();
+        }
+    }
+
+    private void writeSse(HttpExchange ex, String event, String data) throws IOException {
+        String payload = "event: " + event + "\n"
+                + "data: " + data.replace("\n", "\\n") + "\n\n";
+        ex.getResponseBody().write(payload.getBytes(StandardCharsets.UTF_8));
+        ex.getResponseBody().flush();
+    }
+
+    private boolean isTerminal(Document status) {
+        if (status == null) {
+            return false;
+        }
+
+        String stage = status.getString("stage");
+        return "DONE".equals(stage)
+                || "FAILED".equals(stage)
+                || Boolean.TRUE.equals(status.getBoolean("failed"));
+    }
+
     private Document findOne(MongoDatabase db, String collection, String runId) {
         if (runId == null) {
             return null;
@@ -651,7 +764,7 @@ public class CoordinatorAgent extends Agent {
         return normalized;
     }
 
-    private String buildSonarProjectKey(String repoUrl) {
+    private String buildSonarProjectKey(String repoUrl, String safeVersion) {
         String normalized = repoUrl == null ? "repository" : repoUrl.trim();
 
         if (normalized.endsWith(".git")) {
@@ -663,7 +776,7 @@ public class CoordinatorAgent extends Agent {
         String repo = parts.length > 0 ? parts[parts.length - 1] : "repository";
         String owner = parts.length > 1 ? parts[parts.length - 2] : "local";
 
-        String key = "sma:" + sanitizeSonarKeyPart(owner) + ":" + sanitizeSonarKeyPart(repo);
+        String key = "sma:" + sanitizeSonarKeyPart(owner) + ":" + sanitizeSonarKeyPart(repo) + ":" + safeVersion;
 
         if (key.matches("[0-9:._-]+")) {
             key = "sma:repo:" + key;
@@ -684,6 +797,14 @@ public class CoordinatorAgent extends Agent {
         System.out.println("[Coordinator] Sanitized Sonar key part: " + value + " -> " + result);
 
         return result;
+    }
+
+    private String safeVersion(String gitRef) {
+        String ref = gitRef == null || gitRef.isBlank() ? "default" : gitRef;
+        String sanitized = ref.replaceAll("[^A-Za-z0-9._:-]", "-");
+        sanitized = sanitized.replaceAll("-+", "-");
+        sanitized = sanitized.replaceAll("^[.:-]+|[.:-]+$", "");
+        return sanitized.isBlank() ? "default" : sanitized;
     }
 
     private void rt(String runId, String msg) {

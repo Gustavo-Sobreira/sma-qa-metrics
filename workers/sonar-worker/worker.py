@@ -29,7 +29,7 @@ def scan():
     URL_SONAR = os.getenv("URL_SONAR", os.getenv("SONAR_HOST_URL", "http://sonarqube:9000"))
     sonar_token = os.getenv("SONAR_TOKEN") or data.get("sonar_token")
     sonar_project = data.get("sonar_project_key") or data.get("sonar_project") or os.getenv("SONAR_PROJECT") or project_from_path(repo_path)
-    sonar_project_name = data.get("sonar_project_name") or sonar_project
+    sonar_project_name = data.get("sonar_project_name") or repo_path
 
     if not sonar_token:
         return jsonify({
@@ -158,7 +158,7 @@ def ensure_sonar_project(base_url, token, project_key, project_name):
     )
 
     try:
-        with urlopen(req, timeout=30) as resp:
+        with urlopen(req, timeout=300) as resp:
             if 200 <= resp.status < 300:
                 return True, "created"
             body = resp.read().decode("utf-8", errors="replace")

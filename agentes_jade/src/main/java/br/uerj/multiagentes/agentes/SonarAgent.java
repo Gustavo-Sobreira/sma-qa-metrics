@@ -24,6 +24,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
+import java.util.concurrent.Semaphore;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -34,9 +35,11 @@ public class SonarAgent extends Agent {
             "SONAR_WORKER_URL",
             "http://sonar-worker:9100/scan");
     private static final Pattern EXIT_CODE_PATTERN = Pattern.compile("\"exit_code\"\\s*:\\s*(-?\\d+)");
+    private static final Semaphore CONCURRENCY = new Semaphore(
+            Integer.parseInt(System.getenv().getOrDefault("SONAR_MAX_CONCURRENCY", "1")));
 
     private final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(20))
+            .connectTimeout(Duration.ofSeconds(200))
             .build();
 
     @Override
@@ -69,7 +72,13 @@ public class SonarAgent extends Agent {
                     return;
                 }
 
+                boolean acquired = false;
+
                 try {
+                    CONCURRENCY.acquire();
+                    acquired = true;
+                    log(run_id, "CONCURRENCY_ACQUIRED", "RUN_SONAR", Map.of("available_permits", CONCURRENCY.availablePermits()));
+
                     String reqBody = gson.toJson(Map.of(
                             "repo_path", repo_path,
                             "run_id", run_id,
@@ -79,7 +88,7 @@ public class SonarAgent extends Agent {
                     HttpRequest request = HttpRequest.newBuilder()
                             .uri(URI.create(WORKER_URL))
                             .timeout(Duration.ofSeconds(Long.parseLong(
-                                    System.getenv().getOrDefault("SONAR_WORKER_TIMEOUT_SECONDS", "300"))))
+                                    System.getenv().getOrDefault("SONAR_WORKER_TIMEOUT_SECONDS", "3000"))))
                             .header("Content-Type", "application/json")
                             .POST(HttpRequest.BodyPublishers.ofString(reqBody))
                             .build();
@@ -140,6 +149,11 @@ public class SonarAgent extends Agent {
                 } catch (Exception e) {
                     savePostgres(run_id, repo_path, -1, "", e.getMessage());
                     failToCodeAnalyzer(run_id, "sonar", e.getMessage() == null ? "sonar worker error" : e.getMessage());
+                } finally {
+                    if (acquired) {
+                        CONCURRENCY.release();
+                        log(run_id, "CONCURRENCY_RELEASED", "RUN_SONAR", Map.of("available_permits", CONCURRENCY.availablePermits()));
+                    }
                 }
             }
         });

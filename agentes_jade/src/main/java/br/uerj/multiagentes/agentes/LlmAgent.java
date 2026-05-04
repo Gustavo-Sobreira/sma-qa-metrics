@@ -20,6 +20,7 @@ import java.net.URI;
 import java.net.http.*;
 import java.time.*;
 import java.util.*;
+import java.util.concurrent.Semaphore;
 
 public class LlmAgent extends Agent {
 
@@ -33,6 +34,8 @@ public class LlmAgent extends Agent {
 
     private static final String BASE_URL = System.getenv().getOrDefault("GEMINI_BASE_URL",
             "https://generativelanguage.googleapis.com/v1beta/models/");
+    private static final Semaphore CONCURRENCY = new Semaphore(
+            Integer.parseInt(System.getenv().getOrDefault("LLM_MAX_CONCURRENCY", "1")));
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(20))
@@ -52,6 +55,7 @@ public class LlmAgent extends Agent {
                 }
 
                 String run_id = null;
+                boolean acquired = false;
 
                 try {
 
@@ -71,6 +75,9 @@ public class LlmAgent extends Agent {
                     }
 
                     updateStatus(run_id, "running");
+                    CONCURRENCY.acquire();
+                    acquired = true;
+                    log(run_id, "CONCURRENCY_ACQUIRED", "RUN_LLM", Map.of("available_permits", CONCURRENCY.availablePermits()));
 
                     Document raw = loadRaw(run_id);
                     Document unified = buildUnifiedInput(raw);
@@ -93,6 +100,11 @@ public class LlmAgent extends Agent {
                     updateStatus(run_id, "failed", reason);
 
                     notifyFail(run_id, reason);
+                } finally {
+                    if (acquired) {
+                        CONCURRENCY.release();
+                        log(run_id, "CONCURRENCY_RELEASED", "RUN_LLM", Map.of("available_permits", CONCURRENCY.availablePermits()));
+                    }
                 }
             }
         });
@@ -332,7 +344,7 @@ public class LlmAgent extends Agent {
 
         ACLMessage msg = new ACLMessage(ACLMessage.INFORM);
         msg.setOntology("LLM_FAILED");
-        msg.setContent(gson.toJson(Map.of("run_id", run_id, "reason", reason)));
+        msg.setContent(gson.toJson(Map.of("run_id", run_id, "reason", reason == null ? "unknown" : reason)));
         msg.addReceiver(new AID("coordinator_agent", AID.ISLOCALNAME));
         send(msg);
         log(run_id, "SENT", "LLM_FAILED", Map.of("reason", reason == null ? "unknown" : reason));

@@ -189,7 +189,7 @@ public class CodeAnalyzerAgent extends Agent {
         String baseUrl = System.getenv().getOrDefault("URL_SONAR", "http://sonarqube:9000");
 
         try {
-            String sonarJson = fetchMetrics(baseUrl, projectKey, SONAR_METRICS);
+            String sonarJson = fetchMetricsWithRetry(run_id, baseUrl, projectKey, SONAR_METRICS);
 
             Document metrics;
             try {
@@ -243,6 +243,43 @@ public class CodeAnalyzerAgent extends Agent {
                     + " preview=" + preview(body));
         }
         return body;
+    }
+
+    private String fetchMetricsWithRetry(String run_id, String baseUrl, String projectKey, String metricsCsv) throws Exception {
+        int attempts = Integer.parseInt(System.getenv().getOrDefault("SONAR_METRICS_MAX_ATTEMPTS", "20"));
+        long delayMs = Long.parseLong(System.getenv().getOrDefault("SONAR_METRICS_RETRY_DELAY_MS", "3000"));
+        String lastBody = "{}";
+
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            lastBody = fetchMetrics(baseUrl, projectKey, metricsCsv);
+            if (hasMeasures(lastBody)) {
+                return lastBody;
+            }
+
+            log(run_id, "METRICS_NOT_READY", "SONAR_MEASURES",
+                    Map.of("attempt", attempt, "max_attempts", attempts));
+
+            if (attempt < attempts) {
+                Thread.sleep(delayMs);
+            }
+        }
+
+        return lastBody;
+    }
+
+    private boolean hasMeasures(String sonarJson) {
+        try {
+            Map parsed = gson.fromJson(sonarJson, Map.class);
+            Object componentObj = parsed.get("component");
+            if (!(componentObj instanceof Map)) {
+                return false;
+            }
+
+            Object measuresObj = ((Map) componentObj).get("measures");
+            return measuresObj instanceof List && !((List) measuresObj).isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private void notifyCoordinator(String run_id, String ontology, String reason) {
@@ -323,3 +360,5 @@ public class CodeAnalyzerAgent extends Agent {
         return s;
     }
 }
+
+

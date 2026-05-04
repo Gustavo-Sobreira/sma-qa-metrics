@@ -2,7 +2,9 @@ const state = {
   runs: [],
   selectedRunId: "",
   detail: null,
-  timer: null
+  timer: null,
+  events: null,
+  eventRunId: ""
 };
 
 const $ = (id) => document.getElementById(id);
@@ -104,9 +106,43 @@ async function loadSelectedRun() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     state.detail = await response.json();
     renderDetail();
+    connectRunEvents(state.selectedRunId);
   } catch (error) {
     setBanner(`Não foi possível carregar detalhes: ${error.message}`);
   }
+}
+
+function connectRunEvents(runId) {
+  if (!window.EventSource || !runId) return;
+  if (state.events && state.eventRunId === runId) return;
+
+  if (state.events) {
+    state.events.close();
+    state.events = null;
+  }
+
+  state.eventRunId = runId;
+  state.events = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
+
+  state.events.addEventListener("run", (event) => {
+    state.detail = JSON.parse(event.data);
+    renderDetail();
+  });
+
+  state.events.addEventListener("done", async () => {
+    state.events.close();
+    state.events = null;
+    state.eventRunId = "";
+    await refreshRuns();
+  });
+
+  state.events.onerror = () => {
+    if (state.events) {
+      state.events.close();
+      state.events = null;
+      state.eventRunId = "";
+    }
+  };
 }
 
 function renderRunOptions() {

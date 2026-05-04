@@ -45,6 +45,11 @@ PORT_MONGO=27017
 PORT_POSTGRES=5432
 PORT_SONARQUBE=9000
 PORT_SONAR_WORKER=9100
+GIT_MAX_CONCURRENCY=1
+SONAR_MAX_CONCURRENCY=1
+LLM_MAX_CONCURRENCY=1
+SONAR_METRICS_MAX_ATTEMPTS=20
+SONAR_METRICS_RETRY_DELAY_MS=3000
 
 URI_MONGO=mongodb://mongo:27017
 URI_SONAR_JDBC=jdbc:postgresql://postgres:5432/sonar
@@ -143,6 +148,18 @@ http://localhost:8090/
 ```
 
 A interface permite iniciar uma análise, acompanhar o progresso do `CoordinatorAgent`, ver erros, consultar o relatório do LLM e navegar pelo dashboard de projetos já analisados.
+
+O dashboard usa atualização em tempo real via Server-Sent Events:
+
+```text
+GET /api/runs/{run_id}/events
+```
+
+Para automações, também existe o status compacto:
+
+```text
+GET /api/runs/{run_id}/status
+```
 
 ## 5. Dispare uma análise via HTTP
 
@@ -279,12 +296,44 @@ O pipeline coleta:
 - `ncloc`
 - `complexity`
 
+## Versionamento, Diretórios e Concorrência
+
+Quando o webhook recebe `version`, `branch`, `git_ref` ou `ref`, o coordenador gera uma versão segura para paths e chaves. Exemplo:
+
+```json
+{
+  "repository": "https://github.com/joomla/joomla-cms.git",
+  "version": "5.3.4"
+}
+```
+
+Gera:
+
+```text
+repo_path=/repos/joomla-cms:5.3.4
+sonar_project_key=sma:joomla:joomla-cms:5.3.4
+```
+
+Se nenhuma versão for informada, o sufixo usado é `default`.
+
+O servidor HTTP do `CoordinatorAgent` usa um pool de threads (`Executors.newCachedThreadPool`) para atender simultaneamente a UI, o webhook e a API do dashboard. Os agentes bloqueantes têm limites configuráveis:
+
+- `GIT_MAX_CONCURRENCY`
+- `SONAR_MAX_CONCURRENCY`
+- `LLM_MAX_CONCURRENCY`
+- `SONAR_METRICS_MAX_ATTEMPTS`
+- `SONAR_METRICS_RETRY_DELAY_MS`
+
+O valor padrão dos limites de concorrência é `1`, que preserva uma fila estável por agente. Aumente com cuidado se o SonarQube, o worker e o provedor LLM suportarem mais carga.
+
+As variáveis `SONAR_METRICS_MAX_ATTEMPTS` e `SONAR_METRICS_RETRY_DELAY_MS` controlam quantas vezes o `CodeAnalyzerAgent` tenta buscar as métricas depois que o scanner termina. Isso evita gravar metrics vazias quando o SonarQube ainda está processando a análise.
+
 ## Projeto Dinâmico no SonarQube
 
 O projeto SonarQube é criado automaticamente para cada repositório. O `CoordinatorAgent` gera:
 
-- `sonar_project_key`: chave estável baseada em dono e nome do repositório, como `sma:owner:repo`.
-- `sonar_project_name`: nome visível do projeto, baseado no nome do repositório.
+- `sonar_project_key`: chave estável baseada em dono, nome do repositório e versão, como `sma:owner:repo:version`.
+- `sonar_project_name`: nome visível do projeto no SonarQube, igual ao `repo_path`, como `/repos/joomla-cms:5.3.4`.
 
 O `sonar-worker` usa esses valores para chamar:
 
@@ -295,6 +344,18 @@ POST /api/projects/create
 Se o projeto já existir, o worker segue normalmente e executa o scan. A variável `SONAR_PROJECT` continua funcionando apenas como fallback.
 
 ## Comandos Úteis
+
+Rodar as 15 análises sequencialmente, aguardando cada execução terminar antes de iniciar a próxima:
+
+```bash
+./scripts/run_all_analyses.py
+```
+
+Se o webhook estiver em outro host/porta:
+
+```bash
+./scripts/run_all_analyses.py http://localhost:8090
+```
 
 Parar os serviços:
 

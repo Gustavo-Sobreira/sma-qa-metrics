@@ -17,10 +17,13 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.Semaphore;
 
 public class GitAgent extends Agent {
 
     private static final Gson gson = GsonProvider.get();
+    private static final Semaphore CONCURRENCY = new Semaphore(
+            Integer.parseInt(System.getenv().getOrDefault("GIT_MAX_CONCURRENCY", "1")));
 
     @Override
     protected void setup() {
@@ -55,8 +58,13 @@ public class GitAgent extends Agent {
 
                 String output;
                 boolean ok;
+                boolean acquired = false;
 
                 try {
+                    CONCURRENCY.acquire();
+                    acquired = true;
+                    log(run_id, "CONCURRENCY_ACQUIRED", "RUN_GIT", Map.of("available_permits", CONCURRENCY.availablePermits()));
+
                     CommandResult result;
                     if (new java.io.File(repo_path + "/.git").exists()) {
                         result = updateExistingRepository(repo_path, git_ref);
@@ -68,8 +76,13 @@ public class GitAgent extends Agent {
                     ok = result.exitCode == 0;
 
                 } catch (Exception e) {
-                    output = e.getMessage();
+                    output = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
                     ok = false;
+                } finally {
+                    if (acquired) {
+                        CONCURRENCY.release();
+                        log(run_id, "CONCURRENCY_RELEASED", "RUN_GIT", Map.of("available_permits", CONCURRENCY.availablePermits()));
+                    }
                 }
 
                 Map<String, Object> resp = Map.of(
